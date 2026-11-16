@@ -100,13 +100,21 @@ const SEED_KEY = 'ww_roles_seed_v3';
 const PSEED_KEY = 'ww_players_seed_v1';
 const SEED4_KEY = 'ww_roles_seed_v4';
 const MUTE_KEY = 'ww_muted_v1';
+const SEED5_KEY = 'ww_roles_seed_v5';
+const SEED6_KEY = 'ww_roles_seed_v6';
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
 // hasAction = wakes up at night. order = who is called first (lower = earlier).
 // targets = how many players the role picks each night.
+// Rating points a player gains when their role wins (editable per role in Available Roles).
+// Townie roles are the baseline, Werewolf is higher, Vampire is lower, Jester is the highest.
+const BASE_GAIN = { villager: 15, doctor: 15, jester: 40, avenger: 15, werewolf: 25, police: 15, mayor: 15, hunter: 15, vampire: 10, bodyguard: 15, seer: 15, transporter: 15 };
+const OLD_GAIN = { villager: 10, doctor: 10, jester: 30, avenger: 10, werewolf: 20, police: 10, mayor: 10, hunter: 10, vampire: 8, bodyguard: 10, seer: 10, transporter: 10 };
 const mk = (id, name, team, emoji, hasAction, order, targets, nightPrompt, desc) => ({
   id, name, team, emoji, icon: null, builtIn: true, hasAction, order, targets, nightPrompt, desc,
   canTargetSame: team !== 'Villain',
+  ratingGain: BASE_GAIN[id] ?? 10,
+  winOnVote: id === 'jester',   // wins alone if the town votes this player out
 });
 const DEFAULT_ROLES = [
   mk('villager', 'Villager', 'Townie', '🧑‍🌾', false, 50, 1, '',
@@ -114,7 +122,7 @@ const DEFAULT_ROLES = [
   mk('doctor', 'Doctor', 'Townie', '🩺', true, 6, 1, 'Doctor, wake up. Who do you want to protect tonight?',
     'Each night, choose one player to protect from the werewolves.'),
   mk('jester', 'Jester', 'Townie', '🃏', false, 50, 1, '',
-    'You want to be voted out! Fool the town into eliminating you. (Moderator decides what happens if you win.)'),
+    'You want to be voted out! If the town votes you out during the day, you win alone.'),
   mk('avenger', 'Avenger', 'Townie', '🗡️', false, 50, 1, '',
     'If you are eliminated, you may take one player down with you.'),
   mk('werewolf', 'Werewolf', 'Villain', '🐺', true, 3, 1, 'Werewolves, wake up. Who do you want to eliminate tonight?',
@@ -141,8 +149,8 @@ const normalizeRoles = (saved) => {
   DEFAULT_ROLES.forEach((r) => (defaults[r.id] = r));
   return saved.map((r) => {
     const d = defaults[r.id];
-    const base = { hasAction: false, order: 50, targets: 1, nightPrompt: '', canTargetSame: true };
-    if (d) { base.hasAction = d.hasAction; base.order = d.order; base.targets = d.targets; base.nightPrompt = d.nightPrompt; base.canTargetSame = d.canTargetSame; }
+    const base = { hasAction: false, order: 50, targets: 1, nightPrompt: '', canTargetSame: true, ratingGain: 10, winOnVote: false };
+    if (d) { base.hasAction = d.hasAction; base.order = d.order; base.targets = d.targets; base.nightPrompt = d.nightPrompt; base.canTargetSame = d.canTargetSame; base.ratingGain = d.ratingGain; base.winOnVote = d.winOnVote; }
     return { ...base, ...r };
   });
 };
@@ -163,7 +171,8 @@ const suggestCounts = (n, roles) => {
   const has = (id) => roles.some((r) => r.id === id);
   let left = n;
   const put = (id, k) => { if (has(id) && k > 0 && left > 0) { const t = Math.min(k, left); c[id] += t; left -= t; } };
-  put('werewolf', Math.max(1, Math.round(n / 4)));
+  const wolfId = has('werewolf') ? 'werewolf' : (roles.find((r) => r.team === 'Villain') || {}).id;
+  if (wolfId) put(wolfId, Math.max(1, Math.round(n / 4)));
   if (n >= 5) put('seer', 1);
   if (n >= 5) put('doctor', 1);
   if (n >= 8) put('avenger', 1);
@@ -412,6 +421,17 @@ export default function App() {
           list = list.map((x) => (fix[x.id] && x.builtIn ? { ...x, desc: fix[x.id].desc, nightPrompt: fix[x.id].nightPrompt } : x));
           await AsyncStorage.setItem(SEED4_KEY, '1');
         }
+        const seeded5 = await AsyncStorage.getItem(SEED5_KEY);
+        if (!seeded5) {   // one-time: new Jester description
+          const jd = DEFAULT_ROLES.find((d) => d.id === 'jester');
+          list = list.map((x) => (x.id === 'jester' && x.builtIn ? { ...x, desc: jd.desc } : x));
+          await AsyncStorage.setItem(SEED5_KEY, '1');
+        }
+        const seeded6 = await AsyncStorage.getItem(SEED6_KEY);
+        if (!seeded6) {   // one-time: move built-in roles from the old default gains to the new ones (your own edits are kept)
+          list = list.map((x) => (x.builtIn && BASE_GAIN[x.id] != null && (x.ratingGain == null || x.ratingGain === OLD_GAIN[x.id]) ? { ...x, ratingGain: BASE_GAIN[x.id] } : x));
+          await AsyncStorage.setItem(SEED6_KEY, '1');
+        }
         setRoles(list);
       } catch (e) {}
       setLoaded(true);
@@ -428,6 +448,8 @@ export default function App() {
     });
     return () => sub.remove();
   }, [loaded]);
+  // rating only ever goes up: gains = { playerId: points }
+  const awardGains = (gains) => setPlayers((ps) => ps.map((p) => (gains[p.id] ? { ...p, rating: (p.rating || 0) + gains[p.id] } : p)));
   const toggleMute = () => {
     const m = !muted;
     setMuted(m); Sound.setMuted(m);
@@ -466,7 +488,7 @@ export default function App() {
       onCancel={() => { setGame(null); setScreen('assign'); }}
       onDone={() => setScreen('game')} />
   );
-  else if (screen === 'game' && game) body = <Game game={game} setGame={setGame} onExit={() => { setGame(null); setScreen('home'); }} onRematch={() => { setGame(null); setScreen('assign'); }} />;
+  else if (screen === 'game' && game) body = <Game game={game} setGame={setGame} onExit={() => { setGame(null); setScreen('home'); }} onRematch={() => { setGame(null); setScreen('assign'); }} onAward={awardGains} />;
 
   if (loaded && screen === 'home') {
     return (
@@ -537,7 +559,10 @@ function Library({ players, setPlayers, onBack }) {
         renderItem={({ item }) => (
           <TouchableOpacity style={s.row} onPress={() => setEditing({ ...item })} onLongPress={() => remove(item)}>
             <Avatar uri={item.photo} fallback={item.name[0]?.toUpperCase()} size={76} />
-            <Text style={[s.rowText, { flex: 1, fontSize: 20 }]}>{item.name}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={[s.rowText, { fontSize: 20 }]}>{item.name}</Text>
+              <Text style={[s.sub, { color: '#ffd66b', marginTop: 2 }]}>⭐ {item.rating || 0}</Text>
+            </View>
             <Text style={s.sub}>Edit ›</Text>
           </TouchableOpacity>
         )}
@@ -584,7 +609,7 @@ function Roles({ roles, setRoles, onBack }) {
       { text: 'Delete', style: 'destructive', onPress: () => { setRoles(roles.filter((x) => x.id !== r.id)); setEditing(null); } },
     ]);
   };
-  const blank = { name: '', team: 'Townie', desc: '', icon: null, hasAction: false, order: 50, targets: 1, nightPrompt: '', canTargetSame: true };
+  const blank = { name: '', team: 'Townie', desc: '', icon: null, hasAction: false, order: 50, targets: 1, nightPrompt: '', canTargetSame: true, ratingGain: 10, winOnVote: false };
   return (
     <View style={{ flex: 1 }}>
       <Header title="Available Roles" onBack={onBack} right={<TouchableOpacity onPress={() => setEditing(blank)}><Text style={s.link}>＋ Add</Text></TouchableOpacity>} />
@@ -595,7 +620,8 @@ function Roles({ roles, setRoles, onBack }) {
             <RoleAvatar role={item} size={76} />
             <View style={{ flex: 1 }}>
               <Text style={[s.rowText, { fontSize: 19 }]}>{item.name}{item.hasAction ? '  🌙' : ''}</Text>
-              <Text style={s.sub} numberOfLines={3}>{item.desc}</Text>
+              <Text style={s.sub} numberOfLines={2}>{item.desc}</Text>
+              <Text style={[s.sub, { color: '#ffd66b', marginTop: 2 }]}>⭐ +{item.ratingGain ?? 10} on win{item.winOnVote ? ' · wins if voted out' : ''}</Text>
             </View>
             <Tag team={item.team} />
           </TouchableOpacity>
@@ -626,6 +652,20 @@ function Roles({ roles, setRoles, onBack }) {
                 </View>
                 <Text style={s.label}>Description</Text>
                 <TextInput style={[s.input, { height: 90, textAlignVertical: 'top' }]} multiline placeholder="What does this role do?" placeholderTextColor="#777" value={editing.desc} onChangeText={(t) => setEditing({ ...editing, desc: t })} />
+
+                <Text style={s.label}>Rating gained when this role wins</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 6 }}>
+                  <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, ratingGain: Math.max(0, (editing.ratingGain ?? 10) - 5) })}><Text style={s.stepText}>−</Text></TouchableOpacity>
+                  <Text style={s.rowText}>⭐ +{editing.ratingGain ?? 10}</Text>
+                  <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, ratingGain: Math.min(100, (editing.ratingGain ?? 10) + 5) })}><Text style={s.stepText}>＋</Text></TouchableOpacity>
+                </View>
+                <View style={[s.row, { marginTop: 6 }]}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.rowText}>Wins alone when voted out</Text>
+                    <Text style={s.sub}>Like the Jester: the game ends when this player is voted out in the day</Text>
+                  </View>
+                  <Switch value={!!editing.winOnVote} onValueChange={(v) => setEditing({ ...editing, winOnVote: v })} />
+                </View>
 
                 <View style={[s.row, { marginTop: 6 }]}>
                   <View style={{ flex: 1 }}>
@@ -712,6 +752,7 @@ function PickPlayers({ players, selected, setSelected, onBack, onNext, goLibrary
                   {on && <PopIn from={0.1} style={s.badge}><Text style={{ color: '#fff', fontWeight: '800' }}>✓</Text></PopIn>}
                 </View>
                 <Text style={s.cardName} numberOfLines={1}>{item.name}</Text>
+                <Text style={[s.sub, { color: '#ffd66b', fontSize: 12 }]}>⭐ {item.rating || 0}</Text>
               </TouchableOpacity>
             </Bounce>
           );
@@ -729,15 +770,17 @@ function PickPlayers({ players, selected, setSelected, onBack, onNext, goLibrary
 function AssignRoles({ roles, counts, setCounts, total, onBack, onReset, onStart }) {
   const { cols, gap, cardW } = useGrid();
   const sum = Object.values(counts).reduce((a, b) => a + b, 0);
-  const ok = sum === total;
+  const sumOk = sum === total;
   const wolves = roles.filter((r) => r.team === 'Villain').reduce((a, r) => a + (counts[r.id] || 0), 0);
+  const townies = roles.filter((r) => r.team === 'Townie').reduce((a, r) => a + (counts[r.id] || 0), 0);
+  const ok = sumOk && wolves >= 1 && townies >= 1;
   const change = (id, d) => setCounts({ ...counts, [id]: Math.max(0, (counts[id] || 0) + d) });
   return (
     <View style={{ flex: 1 }}>
       <Header title="Confirm Roles" onBack={onBack} right={<TouchableOpacity onPress={onReset}><Text style={s.link}>Auto</Text></TouchableOpacity>} />
       <View style={{ paddingHorizontal: 16 }}>
         <Text style={[s.sub, { textAlign: 'center' }]}>
-          Roles set: <Text style={{ color: ok ? '#6ee7a8' : '#ff8a8a', fontWeight: '700' }}>{sum} / {total}</Text> players
+          Roles set: <Text style={{ color: sumOk ? '#6ee7a8' : '#ff8a8a', fontWeight: '700' }}>{sum} / {total}</Text> players
         </Text>
       </View>
       <FlatList
@@ -762,8 +805,9 @@ function AssignRoles({ roles, counts, setCounts, total, onBack, onReset, onStart
         }}
       />
       <View style={s.footer}>
-        {!ok && <Text style={[s.sub, { textAlign: 'center', color: '#ff8a8a', marginBottom: 6 }]}>Total roles must equal {total}.</Text>}
-        {ok && wolves === 0 && <Text style={[s.sub, { textAlign: 'center', color: '#ffcf70', marginBottom: 6 }]}>No villains in this game!</Text>}
+        {!sumOk && <Text style={[s.sub, { textAlign: 'center', color: '#ff8a8a', marginBottom: 6 }]}>Total roles must equal {total}.</Text>}
+        {sumOk && wolves === 0 && <Text style={[s.sub, { textAlign: 'center', color: '#ff8a8a', marginBottom: 6 }]}>Add at least one Villain role (e.g. Werewolf).</Text>}
+        {sumOk && wolves > 0 && townies === 0 && <Text style={[s.sub, { textAlign: 'center', color: '#ff8a8a', marginBottom: 6 }]}>Add at least one Townie role.</Text>}
         <Btn title="Confirm & Hand Out Roles" onPress={onStart} disabled={!ok} />
       </View>
     </View>
@@ -848,7 +892,7 @@ function RevealRoles({ game, onCancel, onDone }) {
 }
 
 /* ---------- game (moderator) ---------- */
-function Game({ game, setGame, onExit, onRematch }) {
+function Game({ game, setGame, onExit, onRematch, onAward }) {
   useKeepAwake();
   const [phase, setPhase] = useState('night');
   const [day, setDay] = useState(1);
@@ -865,7 +909,6 @@ function Game({ game, setGame, onExit, onRematch }) {
   const [dismissed, setDismissed] = useState(null);
   const [silenced, setSilenced] = useState(null);   // player silenced by the police for the day
   const { cols, gap, cardW } = useGrid();
-  const [hadVillains] = useState(() => game.assignments.some((a) => a.role.team === 'Villain'));
   const night = phase === 'night';
 
   useEffect(() => {
@@ -952,17 +995,20 @@ function Game({ game, setGame, onExit, onRematch }) {
     setShowHolders(false);
   };
 
+  // tapping a player in the day = the town voted them out (no "killed" sound; that is only for night kills)
   const toggleAlive = (i) => {
-    if (game.assignments[i].alive) Sound.play('killed');
-    setGame({ assignments: game.assignments.map((a, k) => (k === i ? { ...a, alive: !a.alive } : a)) });
+    setGame({ assignments: game.assignments.map((a, k) => (k === i ? { ...a, alive: !a.alive, votedOut: a.alive } : a)) });
   };
 
   const villains = aliveList.filter((a) => a.role.team === 'Villain').length;
   const towns = aliveList.length - villains;
-  const winner = !hadVillains ? null
-    : aliveList.length === 0 ? 'Nobody wins 🤝'
-    : villains === 0 ? 'Townies win! 🎉'
-    : villains >= towns ? 'Villains win! 🐺' : null;
+  // a "wins when voted out" role (Jester) that was voted out ends the game with a solo win
+  const jesterWin = game.assignments.find((a) => a.role.winOnVote && a.votedOut && !a.alive);
+  const winInfo = jesterWin ? { kind: 'solo', text: `${jesterWin.role.name} wins! 🃏` }
+    : aliveList.length === 0 ? { kind: 'none', text: 'Nobody wins 🤝' }
+    : villains === 0 ? { kind: 'townie', text: 'Townies win! 🎉' }
+    : villains >= towns ? { kind: 'villain', text: 'Villains win! 🐺' } : null;
+  const winner = winInfo ? winInfo.text : null;
   useEffect(() => { if (!winner) setDismissed(null); }, [winner]);
   const gameOver = !!winner && dismissed !== winner;
   // night music / day music
@@ -992,7 +1038,7 @@ function Game({ game, setGame, onExit, onRematch }) {
   const out = night && !inSteps ? outcome() : null;
 
   if (winner && dismissed !== winner) {
-    return <GameOver winner={winner} assignments={game.assignments} onKeep={() => setDismissed(winner)} onRematch={onRematch} onExit={onExit} />;
+    return <GameOver winner={winner} winKind={winInfo.kind} assignments={game.assignments} onKeep={() => setDismissed(winner)} onAward={onAward} onRematch={onRematch} onExit={onExit} />;
   }
 
   return (
@@ -1177,45 +1223,69 @@ function Game({ game, setGame, onExit, onRematch }) {
 }
 
 /* ---------- game over ---------- */
-function GameOver({ winner, assignments, onKeep, onRematch, onExit }) {
-  // pause the theme and play the fanfare; the theme resumes when this screen closes
+// Who gains rating: a team win rewards every player on that team (alive or dead), except "wins when voted out"
+// roles (Jester). A solo win rewards only that player. Each player gains the ratingGain of their role.
+const computeResult = (assignments, kind) => {
+  const gains = {};
+  assignments.forEach((a) => {
+    let won = false;
+    if (kind === 'solo') won = !!a.role.winOnVote && !!a.votedOut && !a.alive;
+    else if (kind === 'townie') won = a.role.team === 'Townie' && !a.role.winOnVote;
+    else if (kind === 'villain') won = a.role.team === 'Villain' && !a.role.winOnVote;
+    if (won) gains[a.player.id] = a.role.ratingGain ?? 10;
+  });
+  return gains;
+};
+
+function GameOver({ winner, winKind, assignments, onKeep, onAward, onRematch, onExit }) {
+  const gains = computeResult(assignments, winKind);
+  const anyGain = Object.keys(gains).length > 0;
+  const bgColor = { townie: '#12351f', villain: '#3a1018', solo: '#2a1f4a', none: '#25262e' }[winKind];
+  const icon = { townie: '🎉', villain: '🐺', solo: '🃏', none: '🤝' }[winKind];
+  const burst = { townie: '🎉', villain: '🔥', solo: '🃏', none: '✨' }[winKind];
   // theme pauses, the win jingle plays (after the "killed" sound if someone just died), theme resumes on close
   useEffect(() => {
     Sound.pauseMusic();
-    const which = winner.startsWith('Townies') ? 'victory' : winner.startsWith('Villains') ? 'villain' : 'deny';
+    const which = winKind === 'villain' ? 'villain' : winKind === 'none' ? 'deny' : 'victory';
     const sinceKill = Date.now() - Sound.lastKilled;
     const wait = sinceKill < 6000 ? Math.max(700, 5300 - sinceKill) : 700;
     const t = setTimeout(() => Sound.play(which), wait);
     return () => { clearTimeout(t); Sound.stop('victory'); Sound.stop('villain'); Sound.playMusic(); };
   }, []);
-  const townWin = winner.startsWith('Townies');
-  const none = winner.startsWith('Nobody');
   return (
-    <View style={{ flex: 1, backgroundColor: townWin ? '#12351f' : none ? '#25262e' : '#3a1018' }}>
+    <View style={{ flex: 1, backgroundColor: bgColor }}>
       <ScrollView contentContainerStyle={{ padding: 20, alignItems: 'center' }}>
         <View style={{ marginTop: 10, height: 84, alignItems: 'center', justifyContent: 'center' }}>
-          <Burst emoji={townWin ? '🎉' : none ? '✨' : '🔥'} count={10} radius={120} />
-          <PopIn from={0.1}><Text style={{ fontSize: 64 }}>{townWin ? '🎉' : none ? '🤝' : '🐺'}</Text></PopIn>
+          <Burst emoji={burst} count={10} radius={120} />
+          <PopIn from={0.1}><Text style={{ fontSize: 64 }}>{icon}</Text></PopIn>
         </View>
         <FadeUp delay={300}><Text style={[s.title, { fontSize: 30, marginVertical: 6, textAlign: 'center' }]}>{winner}</Text></FadeUp>
         <Text style={[s.sub, { marginBottom: 16 }]}>Game over — here is who everyone was</Text>
         {assignments.map((a, idx) => (
           <FadeUp key={a.player.id} delay={500 + idx * 70} dy={16} style={{ width: '100%' }}>
-          <View style={[s.row, { width: '100%' }, !a.alive && { opacity: 0.65 }]}>
-            <Avatar uri={a.player.photo} fallback={a.player.name[0]?.toUpperCase()} />
-            <View style={{ flex: 1 }}>
-              <Text style={s.rowText}>{a.player.name}</Text>
-              <Text style={s.sub}>{a.role.name}</Text>
+            <View style={[s.row, { width: '100%' }, !a.alive && { opacity: 0.65 }, gains[a.player.id] != null && { borderColor: '#ffd66b' }]}>
+              <Avatar uri={a.player.photo} fallback={a.player.name[0]?.toUpperCase()} />
+              <View style={{ flex: 1 }}>
+                <Text style={s.rowText}>{a.player.name}</Text>
+                <Text style={s.sub}>{a.role.name}</Text>
+                {gains[a.player.id] != null && (
+                  <Text style={{ color: '#ffd66b', fontSize: 13, fontWeight: '700' }}>
+                    🏆 +{gains[a.player.id]} ⭐  (total {(a.player.rating || 0) + gains[a.player.id]})
+                  </Text>
+                )}
+              </View>
+              <RoleAvatar role={a.role} size={36} />
+              <Tag team={a.role.team} />
+              <Text style={{ fontSize: 20 }}>{a.alive ? '❤️' : '💀'}</Text>
             </View>
-            <RoleAvatar role={a.role} size={36} />
-            <Tag team={a.role.team} />
-            <Text style={{ fontSize: 20 }}>{a.alive ? '❤️' : '💀'}</Text>
-          </View>
           </FadeUp>
         ))}
-        <Btn title="Play again (same players)" onPress={onRematch} style={[s.wide, { marginTop: 10 }]} />
-        <Btn title="Main menu" kind="ghost" sfx="deny" onPress={onExit} style={s.wide} />
-        <TouchableOpacity onPress={() => { Sound.play('deny'); onKeep(); }}><Text style={[s.link, { marginVertical: 8 }]}>Back to the game</Text></TouchableOpacity>
+        <Text style={[s.sub, { textAlign: 'center', marginTop: 6, marginBottom: 12 }]}>
+          {anyGain ? 'Ratings are saved when you tap Play again or Main menu.' : 'No rating is awarded for this result.'}
+        </Text>
+        <Btn title={anyGain ? 'Save ratings & play again' : 'Play again (same players)'} onPress={() => { onAward(gains); onRematch(); }} style={s.wide} />
+        <Btn title={anyGain ? 'Save ratings & main menu' : 'Main menu'} kind="ghost" sfx="deny" onPress={() => { onAward(gains); onExit(); }} style={s.wide} />
+        <TouchableOpacity onPress={() => { Sound.play('deny'); onKeep(); }}><Text style={[s.link, { marginVertical: 8 }]}>Back to the game (don't save)</Text></TouchableOpacity>
       </ScrollView>
     </View>
   );
