@@ -1,12 +1,79 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList, Image, ImageBackground, Modal, Switch, useWindowDimensions,
-  StyleSheet, SafeAreaView, ScrollView, Alert, Platform, StatusBar as RNStatusBar,
+  StyleSheet, SafeAreaView, ScrollView, Alert, Platform, AppState, Animated, Easing, Pressable, StatusBar as RNStatusBar,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { useKeepAwake } from 'expo-keep-awake';
+import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+
+/* ---------- audio ---------- */
+// To change a sound later, just replace the file in assets/audio (keep the same file name).
+const MUSIC = {
+  main:  { src: require('./assets/audio/the_clue_march.m4a'), vol: 0.5 },  // menus, setup, role handout
+  night: { src: require('./assets/audio/night.m4a'),          vol: 0.5 },  // when the game turns to night
+  day:   { src: require('./assets/audio/day_strategy.m4a'),   vol: 0.4 },  // when it turns to day (20% quieter)
+};
+const SOUND_FILES = {
+  proceed: require('./assets/audio/proceed.wav'),   // tap that moves the game forward
+  deny: require('./assets/audio/deny.wav'),         // tap that cancels / goes back
+  killed: require('./assets/audio/killed.wav'),     // someone is killed
+  victory: require('./assets/audio/victory.wav'),   // townies win
+  villain: require('./assets/audio/villain.wav'),   // villains win
+};
+const Sound = {
+  muted: false,
+  wanted: false,        // should music be playing right now?
+  track: 'main',        // which music track is current
+  lastKilled: 0,
+  players: {},
+  get(name, src) {
+    try {
+      if (!this.players[name]) this.players[name] = createAudioPlayer(src);
+      return this.players[name];
+    } catch (e) { return null; }
+  },
+  init() { try { setAudioModeAsync({ playsInSilentMode: true }); } catch (e) {} },
+  _restart(p) {
+    try {
+      Promise.resolve(p.seekTo(0)).then(() => p.play()).catch(() => { try { p.play(); } catch (e) {} });
+    } catch (e) {}
+  },
+  play(name) {                       // 'proceed' | 'deny' | 'killed' | 'victory' | 'villain' | 'none'
+    if (this.muted || !name || name === 'none' || !SOUND_FILES[name]) return;
+    if (name === 'killed') this.lastKilled = Date.now();
+    const p = this.get(name, SOUND_FILES[name]);
+    if (p) this._restart(p);
+  },
+  stop(name) { try { if (this.players[name]) this.players[name].pause(); } catch (e) {} },
+  pauseAll() {                       // pause every music track (the "wanted" flag is kept)
+    Object.keys(this.players).forEach((k) => { if (k.indexOf('music_') === 0) { try { this.players[k].pause(); } catch (e) {} } });
+  },
+  playMusic() {                      // play / resume the current track
+    this.wanted = true;
+    if (this.muted) return;
+    const t = MUSIC[this.track];
+    const p = this.get('music_' + this.track, t.src);
+    if (!p) return;
+    try { p.loop = true; p.volume = t.vol; p.play(); } catch (e) {}
+  },
+  pauseMusic() { this.wanted = false; this.pauseAll(); },
+  setTrack(name) {                   // switch to another track, starting from the beginning
+    if (this.track === name && this.wanted) return;
+    this.pauseAll();
+    this.track = name;
+    const p = this.get('music_' + name, MUSIC[name].src);
+    try { if (p) p.seekTo(0); } catch (e) {}
+    this.playMusic();
+  },
+  setMuted(m) {
+    this.muted = m;
+    if (m) this.pauseAll();
+    else if (this.wanted) this.playMusic();
+  },
+};
 
 /* ---------- pictures (put your own files in assets/roles, same file names) ---------- */
 const WALLPAPER = require('./assets/anaxios-main-wallpaper.jpg');
@@ -23,6 +90,7 @@ const ROLE_ASSETS = {
   bodyguard: require('./assets/roles/bodyguard.png'),
   seer: require('./assets/roles/seer.png'),
   transporter: require('./assets/roles/transporter.png'),
+  default: require('./assets/roles/default.png'), // used for custom roles without a picture
 };
 
 /* ---------- constants & helpers ---------- */
@@ -30,6 +98,8 @@ const PLAYERS_KEY = 'ww_players_v1';
 const ROLES_KEY = 'ww_roles_v1';
 const SEED_KEY = 'ww_roles_seed_v3';
 const PSEED_KEY = 'ww_players_seed_v1';
+const SEED4_KEY = 'ww_roles_seed_v4';
+const MUTE_KEY = 'ww_muted_v1';
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
 // hasAction = wakes up at night. order = who is called first (lower = earlier).
@@ -49,14 +119,14 @@ const DEFAULT_ROLES = [
     'If you are eliminated, you may take one player down with you.'),
   mk('werewolf', 'Werewolf', 'Villain', '🐺', true, 3, 1, 'Werewolves, wake up. Who do you want to eliminate tonight?',
     'Each night, the werewolves agree on one player to eliminate. Blend in during the day.'),
-  mk('police', 'Police', 'Townie', '👮', true, 1, 1, 'Police, wake up. Who do you want to arrest tonight?',
-    'Each night, arrest one player. An arrested player cannot use their night ability that night.'),
+  mk('police', 'Police', 'Townie', '👮', true, 1, 1, 'Police, wake up. Who do you want to silence tomorrow?',
+    'Each night, choose one player to silence. That player is not allowed to talk during the next day.'),
   mk('mayor', 'Mayor', 'Townie', '🎩', false, 50, 1, '',
     'Your vote counts as two votes during the day discussion and voting.'),
   mk('hunter', 'Hunter', 'Townie', '🤠', false, 50, 1, '',
     'When you are eliminated, you immediately shoot and eliminate one player of your choice.'),
   mk('vampire', 'Vampire', 'Villain', '🧛', true, 4, 1, 'Vampire, wake up. Who do you want to bite tonight?',
-    'Each night, bite one player to drain or turn them. The moderator decides the effect of the bite.'),
+    'Each night, bite one player to turn them into a vampire. Bitten players become your villain allies.'),
   mk('bodyguard', 'Bodyguard', 'Townie', '🕶️', true, 5, 1, 'Bodyguard, wake up. Who do you want to guard tonight?',
     'Each night, guard one player. If the werewolves attack them, you die in their place.'),
   mk('seer', 'Seer', 'Townie', '🔮', true, 7, 1, 'Seer, wake up. Who do you want to check tonight?',
@@ -123,14 +193,149 @@ const buildNightSteps = (assignments) => {
   return Object.values(map).sort((x, y) => (x.role.order ?? 50) - (y.role.order ?? 50));
 };
 
+/* ---------- animation helpers (built-in Animated API, no extra packages) ---------- */
+// slides + fades its content in when it appears
+const FadeUp = ({ delay = 0, dx = 0, dy = 18, duration = 380, style, children }) => {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(v, { toValue: 1, duration, delay, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+  }, []);
+  return (
+    <Animated.View style={[{ alignItems: 'center' }, style, {
+      opacity: v,
+      transform: [
+        { translateX: v.interpolate({ inputRange: [0, 1], outputRange: [dx, 0] }) },
+        { translateY: v.interpolate({ inputRange: [0, 1], outputRange: [dy, 0] }) },
+      ],
+    }]}>{children}</Animated.View>
+  );
+};
+
+// pops in with a springy overshoot
+const PopIn = ({ delay = 0, from = 0.3, style, children }) => {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.sequence([Animated.delay(delay), Animated.spring(v, { toValue: 1, friction: 5, tension: 120, useNativeDriver: true })]).start();
+  }, []);
+  return (
+    <Animated.View style={[{ alignItems: 'center' }, style, {
+      opacity: v.interpolate({ inputRange: [0, 0.4], outputRange: [0, 1], extrapolate: 'clamp' }),
+      transform: [{ scale: v.interpolate({ inputRange: [0, 1], outputRange: [from, 1] }) }],
+    }]}>{children}</Animated.View>
+  );
+};
+
+// card-flip + pop (used when a role is revealed)
+const FlipIn = ({ delay = 0, style, children }) => {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.sequence([Animated.delay(delay), Animated.spring(v, { toValue: 1, friction: 6, tension: 70, useNativeDriver: true })]).start();
+  }, []);
+  return (
+    <Animated.View style={[style, {
+      opacity: v.interpolate({ inputRange: [0, 0.25], outputRange: [0, 1], extrapolate: 'clamp' }),
+      transform: [
+        { perspective: 900 },
+        { rotateY: v.interpolate({ inputRange: [0, 1], outputRange: ['90deg', '0deg'] }) },
+        { scale: v.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] }) },
+      ],
+    }]}>{children}</Animated.View>
+  );
+};
+
+// small bounce every time `trigger` changes (selecting a card, changing a counter)
+const Bounce = ({ trigger, style, children }) => {
+  const v = useRef(new Animated.Value(1)).current;
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) { first.current = false; return; }
+    Animated.sequence([
+      Animated.timing(v, { toValue: 1.09, duration: 110, useNativeDriver: true }),
+      Animated.spring(v, { toValue: 1, friction: 4, useNativeDriver: true }),
+    ]).start();
+  }, [trigger]);
+  return <Animated.View style={[style, { transform: [{ scale: v }] }]}>{children}</Animated.View>;
+};
+
+// gentle floating up/down
+const Bob = ({ amount = 7, duration = 1000, style, children }) => {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(v, { toValue: 1, duration, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      Animated.timing(v, { toValue: 0, duration, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, []);
+  return <Animated.View style={[style, { transform: [{ translateY: v.interpolate({ inputRange: [0, 1], outputRange: [0, -amount] }) }] }]}>{children}</Animated.View>;
+};
+
+// pulsing glow behind an image
+const Glow = ({ color, size }) => {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(v, { toValue: 1, duration: 1100, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      Animated.timing(v, { toValue: 0, duration: 1100, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, []);
+  return (
+    <Animated.View pointerEvents="none" style={{
+      position: 'absolute', width: size, height: size, borderRadius: size / 2, backgroundColor: color,
+      opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.18, 0.45] }),
+      transform: [{ scale: v.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1.12] }) }],
+    }} />
+  );
+};
+
+// emoji sparkles flying outward once
+const Burst = ({ emoji = '✨', count = 8, radius = 105 }) => {
+  const vals = useRef(Array.from({ length: count }, () => new Animated.Value(0))).current;
+  useEffect(() => {
+    Animated.stagger(45, vals.map((v) => Animated.timing(v, { toValue: 1, duration: 900, easing: Easing.out(Easing.cubic), useNativeDriver: true }))).start();
+  }, []);
+  return (
+    <View pointerEvents="none" style={{ position: 'absolute', width: 1, height: 1, alignItems: 'center', justifyContent: 'center' }}>
+      {vals.map((v, i) => {
+        const ang = (i / count) * Math.PI * 2;
+        return (
+          <Animated.Text key={i} style={{
+            position: 'absolute', fontSize: 22,
+            opacity: v.interpolate({ inputRange: [0, 0.2, 1], outputRange: [0, 1, 0] }),
+            transform: [
+              { translateX: v.interpolate({ inputRange: [0, 1], outputRange: [0, Math.cos(ang) * radius] }) },
+              { translateY: v.interpolate({ inputRange: [0, 1], outputRange: [0, Math.sin(ang) * radius] }) },
+              { scale: v.interpolate({ inputRange: [0, 0.3, 1], outputRange: [0.3, 1.2, 0.6] }) },
+            ],
+          }}>{emoji}</Animated.Text>
+        );
+      })}
+    </View>
+  );
+};
+
+// every screen fades / slides in when it opens
+const Screen = ({ children }) => <FadeUp dy={14} duration={260} style={{ flex: 1, alignItems: 'stretch' }}>{children}</FadeUp>;
+
+const APressable = Animated.createAnimatedComponent(Pressable);
+
 /* ---------- small UI pieces ---------- */
-const Btn = ({ title, onPress, kind = 'primary', disabled, style }) => (
-  <TouchableOpacity
-    onPress={onPress} disabled={disabled} activeOpacity={0.8}
-    style={[s.btn, kind === 'ghost' && s.btnGhost, kind === 'danger' && s.btnDanger, disabled && { opacity: 0.4 }, style]}>
-    <Text style={s.btnText}>{title}</Text>
-  </TouchableOpacity>
-);
+// sfx: 'proceed' (default) | 'deny' (cancel / back) | 'none'.  Buttons squish a little when pressed.
+const Btn = ({ title, onPress, kind = 'primary', disabled, style, sfx = 'proceed' }) => {
+  const sc = useRef(new Animated.Value(1)).current;
+  const to = (v) => Animated.spring(sc, { toValue: v, friction: 6, tension: 220, useNativeDriver: true }).start();
+  return (
+    <APressable
+      onPress={() => { Sound.play(sfx); if (onPress) onPress(); }}
+      onPressIn={() => to(0.95)} onPressOut={() => to(1)} disabled={disabled}
+      style={[s.btn, kind === 'ghost' && s.btnGhost, kind === 'danger' && s.btnDanger, disabled && { opacity: 0.4 }, style, { transform: [{ scale: sc }] }]}>
+      <Text style={s.btnText}>{title}</Text>
+    </APressable>
+  );
+};
 
 const Avatar = ({ uri, fallback, size = 48 }) =>
   uri ? (
@@ -141,16 +346,12 @@ const Avatar = ({ uri, fallback, size = 48 }) =>
     </View>
   );
 
-// Role picture: your uploaded picture > default asset picture > emoji
+// Role picture: your uploaded picture > built-in role picture > generic default.png
 const RoleAvatar = ({ role, size = 48 }) => {
   const r = size * 0.22;
   if (role.icon) return <Image source={{ uri: role.icon }} style={{ width: size, height: size, borderRadius: r, backgroundColor: '#333' }} />;
   if (ROLE_ASSETS[role.id]) return <Image source={ROLE_ASSETS[role.id]} resizeMode="contain" style={{ width: size, height: size }} />;
-  return (
-    <View style={{ width: size, height: size, borderRadius: r, backgroundColor: '#2d2f45', alignItems: 'center', justifyContent: 'center' }}>
-      <Text style={{ fontSize: size * 0.5, color: '#fff' }}>{role.emoji || '⭐'}</Text>
-    </View>
-  );
+  return <Image source={ROLE_ASSETS.default} resizeMode="contain" style={{ width: size, height: size }} />;
 };
 
 const Tag = ({ team }) => (
@@ -161,7 +362,7 @@ const Tag = ({ team }) => (
 
 const Header = ({ title, onBack, right }) => (
   <View style={s.header}>
-    {onBack ? <TouchableOpacity onPress={onBack} style={{ width: 60 }}><Text style={s.link}>‹ Back</Text></TouchableOpacity> : <View style={{ width: 60 }} />}
+    {onBack ? <TouchableOpacity onPress={() => { Sound.play('deny'); onBack(); }} style={{ width: 60 }}><Text style={s.link}>‹ Back</Text></TouchableOpacity> : <View style={{ width: 60 }} />}
     <Text style={s.title}>{title}</Text>
     <View style={{ width: 60, alignItems: 'flex-end' }}>{right}</View>
   </View>
@@ -176,10 +377,13 @@ export default function App() {
   const [selected, setSelected] = useState({});   // playerId -> true
   const [counts, setCounts] = useState({});
   const [game, setGame] = useState(null);         // { assignments: [{player, role, alive}] }
+  const [muted, setMuted] = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
+        const mu = await AsyncStorage.getItem(MUTE_KEY);
+        Sound.setMuted(mu === '1'); setMuted(mu === '1');
         const p = await AsyncStorage.getItem(PLAYERS_KEY);
         const r = await AsyncStorage.getItem(ROLES_KEY);
         let plist = p ? JSON.parse(p) : [];
@@ -201,11 +405,34 @@ export default function App() {
           DEFAULT_ROLES.forEach((d) => { if (!have.has(d.id)) list.push(d); });
           await AsyncStorage.setItem(SEED_KEY, '1');
         }
+        const seeded4 = await AsyncStorage.getItem(SEED4_KEY);
+        if (!seeded4) {
+          const fix = {};
+          DEFAULT_ROLES.filter((d) => d.id === 'police' || d.id === 'vampire').forEach((d) => (fix[d.id] = d));
+          list = list.map((x) => (fix[x.id] && x.builtIn ? { ...x, desc: fix[x.id].desc, nightPrompt: fix[x.id].nightPrompt } : x));
+          await AsyncStorage.setItem(SEED4_KEY, '1');
+        }
         setRoles(list);
       } catch (e) {}
       setLoaded(true);
     })();
   }, []);
+  // background music: starts when the app is ready, pauses while the app is in the background
+  useEffect(() => {
+    if (!loaded) return undefined;
+    Sound.init();
+    Sound.playMusic();
+    const sub = AppState.addEventListener('change', (st) => {
+      if (st === 'active') { if (Sound.wanted && !Sound.muted) Sound.playMusic(); }
+      else Sound.pauseAll();
+    });
+    return () => sub.remove();
+  }, [loaded]);
+  const toggleMute = () => {
+    const m = !muted;
+    setMuted(m); Sound.setMuted(m);
+    AsyncStorage.setItem(MUTE_KEY, m ? '1' : '0').catch(() => {});
+  };
   useEffect(() => { if (loaded) AsyncStorage.setItem(PLAYERS_KEY, JSON.stringify(players)).catch(() => {}); }, [players, loaded]);
   useEffect(() => { if (loaded) AsyncStorage.setItem(ROLES_KEY, JSON.stringify(roles)).catch(() => {}); }, [roles, loaded]);
 
@@ -213,7 +440,7 @@ export default function App() {
 
   let body = null;
   if (!loaded) body = <View style={s.center}><Text style={s.sub}>Loading…</Text></View>;
-  else if (screen === 'home') body = <Home go={setScreen} onNew={() => { setSelected({}); setScreen('pick'); }} />;
+  else if (screen === 'home') body = <Home go={setScreen} onNew={() => { setSelected({}); setScreen('pick'); }} muted={muted} onToggleMute={toggleMute} />;
   else if (screen === 'library') body = <Library players={players} setPlayers={setPlayers} onBack={() => setScreen('home')} />;
   else if (screen === 'roles') body = <Roles roles={roles} setRoles={setRoles} onBack={() => setScreen('home')} />;
   else if (screen === 'pick') body = (
@@ -245,7 +472,7 @@ export default function App() {
     return (
       <View style={{ flex: 1, backgroundColor: '#000' }}>
         <StatusBar style="light" translucent />
-        {body}
+        <Screen key={screen + loaded}>{body}</Screen>
       </View>
     );
   }
@@ -253,23 +480,37 @@ export default function App() {
   return (
     <SafeAreaView style={s.safe}>
       <StatusBar style="light" />
-      {body}
+      <Screen key={screen + loaded}>{body}</Screen>
     </SafeAreaView>
   );
 }
 
 /* ---------- home ---------- */
-function Home({ go, onNew }) {
+function Home({ go, onNew, muted, onToggleMute }) {
+  const zoom = useRef(new Animated.Value(0)).current;
+  useEffect(() => {   // slow "breathing" zoom on the wallpaper
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(zoom, { toValue: 1, duration: 12000, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(zoom, { toValue: 0, duration: 12000, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, []);
   return (
-    <ImageBackground source={WALLPAPER} resizeMode="cover" style={{ flex: 1 }}>
-      <View style={{ flex: 1, justifyContent: 'flex-end', padding: 20, paddingBottom: Platform.OS === 'ios' ? 184 : 168 }}>
-        <View style={s.menuCard}>
-          <Btn title="New Game" onPress={onNew} style={[s.wide, { backgroundColor: '#e0952b' }]} />
-          <Btn title="Players Library" kind="ghost" onPress={() => go('library')} style={[s.wide, s.menuGhost]} />
-          <Btn title="Available Roles" kind="ghost" onPress={() => go('roles')} style={[s.wide, s.menuGhost, { marginBottom: 0 }]} />
+    <View style={{ flex: 1, overflow: 'hidden', backgroundColor: '#000' }}>
+      <Animated.Image source={WALLPAPER} resizeMode="cover"
+        style={[StyleSheet.absoluteFill, { width: undefined, height: undefined, transform: [{ scale: zoom.interpolate({ inputRange: [0, 1], outputRange: [1, 1.07] }) }] }]} />
+      <TouchableOpacity onPress={onToggleMute} style={s.muteBtn} activeOpacity={0.8}>
+        <Text style={{ fontSize: 20 }}>{muted ? '🔇' : '🔊'}</Text>
+      </TouchableOpacity>
+      <View style={{ flex: 1, justifyContent: 'flex-end', padding: 20, paddingBottom: Platform.OS === 'ios' ? 254 : 238 }}>
+        <View>
+          <FadeUp delay={150} dy={30} style={{ alignItems: 'stretch' }}><Btn title="New Game" onPress={onNew} style={[s.wide, { backgroundColor: '#e0952b' }]} /></FadeUp>
+          <FadeUp delay={300} dy={30} style={{ alignItems: 'stretch' }}><Btn title="Players Library" kind="ghost" onPress={() => go('library')} style={[s.wide, s.menuGhost]} /></FadeUp>
+          <FadeUp delay={450} dy={30} style={{ alignItems: 'stretch' }}><Btn title="Available Roles" kind="ghost" onPress={() => go('roles')} style={[s.wide, s.menuGhost, { marginBottom: 0 }]} /></FadeUp>
         </View>
       </View>
-    </ImageBackground>
+    </View>
   );
 }
 
@@ -295,8 +536,8 @@ function Library({ players, setPlayers, onBack }) {
         ListEmptyComponent={<Text style={[s.sub, { textAlign: 'center', marginTop: 40 }]}>No players yet. Tap “＋ Add”.</Text>}
         renderItem={({ item }) => (
           <TouchableOpacity style={s.row} onPress={() => setEditing({ ...item })} onLongPress={() => remove(item)}>
-            <Avatar uri={item.photo} fallback={item.name[0]?.toUpperCase()} />
-            <Text style={[s.rowText, { flex: 1 }]}>{item.name}</Text>
+            <Avatar uri={item.photo} fallback={item.name[0]?.toUpperCase()} size={76} />
+            <Text style={[s.rowText, { flex: 1, fontSize: 20 }]}>{item.name}</Text>
             <Text style={s.sub}>Edit ›</Text>
           </TouchableOpacity>
         )}
@@ -307,16 +548,16 @@ function Library({ players, setPlayers, onBack }) {
           <View style={s.modal}>
             {editing && (<>
               <Text style={[s.title, { marginBottom: 12 }]}>{editing.id ? 'Edit Player' : 'Add Player'}</Text>
-              <TouchableOpacity onPress={async () => { const u = await pickImage(); if (u) setEditing({ ...editing, photo: u }); }} style={{ alignSelf: 'center' }}>
-                <Avatar uri={editing.photo} fallback="📷" size={96} />
+              <TouchableOpacity onPress={async () => { const u = await pickImage(); if (u) setEditing({ ...editing, photo: u }); }} style={{ alignSelf: 'center', alignItems: 'center' }}>
+                <Avatar uri={editing.photo} fallback="📷" size={110} />
                 <Text style={[s.link, { textAlign: 'center', marginTop: 6 }]}>{editing.photo ? 'Change picture' : 'Upload picture'}</Text>
               </TouchableOpacity>
               <TextInput style={s.input} placeholder="Player name" placeholderTextColor="#777" value={editing.name} onChangeText={(t) => setEditing({ ...editing, name: t })} />
               <View style={{ flexDirection: 'row', gap: 10 }}>
-                <Btn title="Cancel" kind="ghost" onPress={() => setEditing(null)} style={{ flex: 1 }} />
+                <Btn title="Cancel" kind="ghost" sfx="deny" onPress={() => setEditing(null)} style={{ flex: 1 }} />
                 <Btn title="Save" onPress={save} style={{ flex: 1 }} />
               </View>
-              {editing.id && <Btn title="Delete player" kind="danger" onPress={() => { const p = editing; setEditing(null); remove(p); }} style={{ marginTop: 10 }} />}
+              {editing.id && <Btn title="Delete player" kind="danger" sfx="deny" onPress={() => { const p = editing; setEditing(null); remove(p); }} style={{ marginTop: 10 }} />}
             </>)}
           </View>
         </View>
@@ -343,7 +584,7 @@ function Roles({ roles, setRoles, onBack }) {
       { text: 'Delete', style: 'destructive', onPress: () => { setRoles(roles.filter((x) => x.id !== r.id)); setEditing(null); } },
     ]);
   };
-  const blank = { name: '', team: 'Townie', desc: '', emoji: '⭐', icon: null, hasAction: false, order: 50, targets: 1, nightPrompt: '', canTargetSame: true };
+  const blank = { name: '', team: 'Townie', desc: '', icon: null, hasAction: false, order: 50, targets: 1, nightPrompt: '', canTargetSame: true };
   return (
     <View style={{ flex: 1 }}>
       <Header title="Available Roles" onBack={onBack} right={<TouchableOpacity onPress={() => setEditing(blank)}><Text style={s.link}>＋ Add</Text></TouchableOpacity>} />
@@ -351,10 +592,10 @@ function Roles({ roles, setRoles, onBack }) {
         data={roles} keyExtractor={(r) => r.id} contentContainerStyle={{ padding: 16 }}
         renderItem={({ item }) => (
           <TouchableOpacity style={s.row} onPress={() => setEditing({ ...item })} onLongPress={() => remove(item)}>
-            <RoleAvatar role={item} />
+            <RoleAvatar role={item} size={76} />
             <View style={{ flex: 1 }}>
-              <Text style={s.rowText}>{item.name}{item.hasAction ? '  🌙' : ''}</Text>
-              <Text style={s.sub} numberOfLines={2}>{item.desc}</Text>
+              <Text style={[s.rowText, { fontSize: 19 }]}>{item.name}{item.hasAction ? '  🌙' : ''}</Text>
+              <Text style={s.sub} numberOfLines={3}>{item.desc}</Text>
             </View>
             <Tag team={item.team} />
           </TouchableOpacity>
@@ -363,68 +604,71 @@ function Roles({ roles, setRoles, onBack }) {
       <Text style={[s.sub, { textAlign: 'center', padding: 8 }]}>🌙 = has a night action · Tap to edit</Text>
       <Modal visible={!!editing} transparent animationType="slide" onRequestClose={() => setEditing(null)}>
         <View style={s.modalWrap}>
-          <ScrollView style={s.modal} keyboardShouldPersistTaps="handled">
+          <View style={s.modal}>
             {editing && (<>
-              <Text style={[s.title, { marginBottom: 12 }]}>{editing.id ? 'Edit Role' : 'Add Role'}</Text>
-              <TouchableOpacity onPress={async () => { const u = await pickImage(); if (u) setEditing({ ...editing, icon: u }); }} style={{ alignSelf: 'center' }}>
-                <RoleAvatar role={editing} size={96} />
-                <Text style={[s.link, { textAlign: 'center', marginTop: 6 }]}>{editing.icon ? 'Change picture' : 'Upload picture / icon'}</Text>
-              </TouchableOpacity>
-              {editing.icon && <TouchableOpacity onPress={() => setEditing({ ...editing, icon: null })}><Text style={[s.sub, { textAlign: 'center' }]}>Remove my picture (use default)</Text></TouchableOpacity>}
-              <Text style={s.label}>Emoji (used when there is no picture)</Text>
-              <TextInput style={s.input} value={editing.emoji} maxLength={4} onChangeText={(t) => setEditing({ ...editing, emoji: t })} />
-              <Text style={s.label}>Name</Text>
-              <TextInput style={s.input} placeholder="Role name" placeholderTextColor="#777" value={editing.name} onChangeText={(t) => setEditing({ ...editing, name: t })} />
-              <Text style={s.label}>Category</Text>
-              <View style={{ flexDirection: 'row', gap: 10, marginBottom: 10 }}>
-                {['Townie', 'Villain'].map((t) => (
-                  <TouchableOpacity key={t} onPress={() => setEditing({ ...editing, team: t })}
-                    style={[s.chip, editing.team === t && (t === 'Townie' ? s.chipTown : s.chipVill)]}>
-                    <Text style={s.btnText}>{t}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              <Text style={s.label}>Description</Text>
-              <TextInput style={[s.input, { height: 90, textAlignVertical: 'top' }]} multiline placeholder="What does this role do?" placeholderTextColor="#777" value={editing.desc} onChangeText={(t) => setEditing({ ...editing, desc: t })} />
+              <Text style={[s.title, { marginBottom: 10, textAlign: 'center' }]}>{editing.id ? 'Edit Role' : 'Add Role'}</Text>
+              <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 12 }}>
+                <TouchableOpacity onPress={async () => { const u = await pickImage(); if (u) setEditing({ ...editing, icon: u }); }} style={{ alignSelf: 'center', alignItems: 'center' }}>
+                  <RoleAvatar role={editing} size={110} />
+                  <Text style={[s.link, { textAlign: 'center', marginTop: 6 }]}>{editing.icon ? 'Change picture' : 'Upload picture / icon'}</Text>
+                </TouchableOpacity>
+                {editing.icon && <TouchableOpacity onPress={() => setEditing({ ...editing, icon: null })}><Text style={[s.sub, { textAlign: 'center' }]}>Remove my picture (use default)</Text></TouchableOpacity>}
+                <Text style={s.label}>Name</Text>
+                <TextInput style={s.input} placeholder="Role name" placeholderTextColor="#777" value={editing.name} onChangeText={(t) => setEditing({ ...editing, name: t })} />
+                <Text style={s.label}>Category</Text>
+                <View style={{ flexDirection: 'row', gap: 10, marginBottom: 10 }}>
+                  {['Townie', 'Villain'].map((t) => (
+                    <TouchableOpacity key={t} onPress={() => setEditing({ ...editing, team: t })}
+                      style={[s.chip, editing.team === t && (t === 'Townie' ? s.chipTown : s.chipVill)]}>
+                      <Text style={s.btnText}>{t}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <Text style={s.label}>Description</Text>
+                <TextInput style={[s.input, { height: 90, textAlignVertical: 'top' }]} multiline placeholder="What does this role do?" placeholderTextColor="#777" value={editing.desc} onChangeText={(t) => setEditing({ ...editing, desc: t })} />
 
-              <View style={[s.row, { marginTop: 6 }]}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.rowText}>Has a night action</Text>
-                  <Text style={s.sub}>Moderator wakes this role up each night</Text>
-                </View>
-                <Switch value={!!editing.hasAction} onValueChange={(v) => setEditing({ ...editing, hasAction: v })} />
-              </View>
-              {editing.hasAction && (<>
-                <Text style={s.label}>Night order (lower wakes up first)</Text>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 6 }}>
-                  <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, order: Math.max(1, (editing.order ?? 50) - 1) })}><Text style={s.stepText}>−</Text></TouchableOpacity>
-                  <Text style={s.rowText}>{editing.order ?? 50}</Text>
-                  <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, order: (editing.order ?? 50) + 1 })}><Text style={s.stepText}>＋</Text></TouchableOpacity>
-                </View>
-                <Text style={s.label}>Players chosen each night</Text>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 6 }}>
-                  <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, targets: Math.max(1, (editing.targets ?? 1) - 1) })}><Text style={s.stepText}>−</Text></TouchableOpacity>
-                  <Text style={s.rowText}>{editing.targets ?? 1}</Text>
-                  <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, targets: Math.min(3, (editing.targets ?? 1) + 1) })}><Text style={s.stepText}>＋</Text></TouchableOpacity>
-                </View>
                 <View style={[s.row, { marginTop: 6 }]}>
                   <View style={{ flex: 1 }}>
-                    <Text style={s.rowText}>Can choose same-role players</Text>
-                    <Text style={s.sub}>Turn off so e.g. werewolves can't pick each other</Text>
+                    <Text style={s.rowText}>Has a night action</Text>
+                    <Text style={s.sub}>Moderator wakes this role up each night</Text>
                   </View>
-                  <Switch value={editing.canTargetSame !== false} onValueChange={(v) => setEditing({ ...editing, canTargetSame: v })} />
+                  <Switch value={!!editing.hasAction} onValueChange={(v) => setEditing({ ...editing, hasAction: v })} />
                 </View>
-                <Text style={s.label}>What the moderator asks at night</Text>
-                <TextInput style={[s.input, { height: 70, textAlignVertical: 'top' }]} multiline placeholder="e.g. Doctor, wake up. Who do you want to protect?" placeholderTextColor="#777" value={editing.nightPrompt} onChangeText={(t) => setEditing({ ...editing, nightPrompt: t })} />
-              </>)}
+                {editing.hasAction && (<>
+                  <Text style={s.label}>Night order (lower wakes up first)</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 6 }}>
+                    <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, order: Math.max(1, (editing.order ?? 50) - 1) })}><Text style={s.stepText}>−</Text></TouchableOpacity>
+                    <Text style={s.rowText}>{editing.order ?? 50}</Text>
+                    <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, order: (editing.order ?? 50) + 1 })}><Text style={s.stepText}>＋</Text></TouchableOpacity>
+                  </View>
+                  <Text style={s.label}>Players chosen each night</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 6 }}>
+                    <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, targets: Math.max(1, (editing.targets ?? 1) - 1) })}><Text style={s.stepText}>−</Text></TouchableOpacity>
+                    <Text style={s.rowText}>{editing.targets ?? 1}</Text>
+                    <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, targets: Math.min(3, (editing.targets ?? 1) + 1) })}><Text style={s.stepText}>＋</Text></TouchableOpacity>
+                  </View>
+                  <View style={[s.row, { marginTop: 6 }]}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.rowText}>Can choose same-role players</Text>
+                      <Text style={s.sub}>Turn off so e.g. werewolves can't pick each other</Text>
+                    </View>
+                    <Switch value={editing.canTargetSame !== false} onValueChange={(v) => setEditing({ ...editing, canTargetSame: v })} />
+                  </View>
+                  <Text style={s.label}>What the moderator asks at night</Text>
+                  <TextInput style={[s.input, { height: 70, textAlignVertical: 'top' }]} multiline placeholder="e.g. Doctor, wake up. Who do you want to protect?" placeholderTextColor="#777" value={editing.nightPrompt} onChangeText={(t) => setEditing({ ...editing, nightPrompt: t })} />
+                </>)}
+              </ScrollView>
 
-              <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
-                <Btn title="Cancel" kind="ghost" onPress={() => setEditing(null)} style={{ flex: 1 }} />
-                <Btn title="Save" onPress={save} style={{ flex: 1 }} />
+              {/* fixed at the bottom */}
+              <View style={s.modalFooter}>
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <Btn title="Cancel" kind="ghost" sfx="deny" onPress={() => setEditing(null)} style={{ flex: 1 }} />
+                  <Btn title="Save" onPress={save} style={{ flex: 1 }} />
+                </View>
+                {editing.id && editing.id !== 'villager' && <Btn title="Delete role" kind="danger" sfx="deny" onPress={() => remove(editing)} style={{ marginTop: 10 }} />}
               </View>
-              {editing.id && editing.id !== 'villager' && <Btn title="Delete role" kind="danger" onPress={() => remove(editing)} style={{ marginTop: 10, marginBottom: 20 }} />}
             </>)}
-          </ScrollView>
+          </View>
         </View>
       </Modal>
     </View>
@@ -460,14 +704,16 @@ function PickPlayers({ players, selected, setSelected, onBack, onNext, goLibrary
         renderItem={({ item }) => {
           const on = !!selected[item.id];
           return (
-            <TouchableOpacity activeOpacity={0.85} style={[s.card, { width: cardW, marginBottom: gap }, on && s.cardOn]}
-              onPress={() => setSelected({ ...selected, [item.id]: !on })}>
-              <View>
-                <Avatar uri={item.photo} fallback={item.name[0]?.toUpperCase()} size={Math.min(72, cardW - 40)} />
-                {on && <View style={s.badge}><Text style={{ color: '#fff', fontWeight: '800' }}>✓</Text></View>}
-              </View>
-              <Text style={s.cardName} numberOfLines={1}>{item.name}</Text>
-            </TouchableOpacity>
+            <Bounce trigger={on} style={{ width: cardW, marginBottom: gap }}>
+              <TouchableOpacity activeOpacity={0.85} style={[s.card, on && s.cardOn]}
+                onPress={() => setSelected({ ...selected, [item.id]: !on })}>
+                <View>
+                  <Avatar uri={item.photo} fallback={item.name[0]?.toUpperCase()} size={Math.min(72, cardW - 40)} />
+                  {on && <PopIn from={0.1} style={s.badge}><Text style={{ color: '#fff', fontWeight: '800' }}>✓</Text></PopIn>}
+                </View>
+                <Text style={s.cardName} numberOfLines={1}>{item.name}</Text>
+              </TouchableOpacity>
+            </Bounce>
           );
         }}
       />
@@ -500,7 +746,8 @@ function AssignRoles({ roles, counts, setCounts, total, onBack, onReset, onStart
         renderItem={({ item }) => {
           const c = counts[item.id] || 0;
           return (
-            <View style={[s.card, { width: cardW, marginBottom: gap }, c > 0 && s.cardOn]}>
+            <Bounce trigger={c} style={{ width: cardW, marginBottom: gap }}>
+            <View style={[s.card, c > 0 && s.cardOn]}>
               <RoleAvatar role={item} size={Math.min(64, cardW - 30)} />
               <Text style={s.cardName} numberOfLines={1}>{item.name}{item.hasAction ? ' 🌙' : ''}</Text>
               <View style={{ alignSelf: 'center' }}><Tag team={item.team} /></View>
@@ -510,6 +757,7 @@ function AssignRoles({ roles, counts, setCounts, total, onBack, onReset, onStart
                 <TouchableOpacity style={s.miniStep} onPress={() => change(item.id, 1)}><Text style={s.stepText}>＋</Text></TouchableOpacity>
               </View>
             </View>
+            </Bounce>
           );
         }}
       />
@@ -525,10 +773,11 @@ function AssignRoles({ roles, counts, setCounts, total, onBack, onReset, onStart
 /* ---------- pass the device: each player checks their own role ---------- */
 function RevealRoles({ game, onCancel, onDone }) {
   const [i, setI] = useState(0);
-  const [shown, setShown] = useState(false);
+  const [stage, setStage] = useState('pass');   // 'pass' -> 'role' -> (next player) ... -> 'ready'
   const total = game.assignments.length;
   const a = game.assignments[i];
   const last = i === total - 1;
+  const villain = a.role.team === 'Villain';
 
   const confirmCancel = () =>
     Alert.alert('Cancel role reveal?', 'Roles will be dealt again next time.', [
@@ -537,32 +786,63 @@ function RevealRoles({ game, onCancel, onDone }) {
     ]);
 
   const next = () => {
-    setShown(false);
-    if (last) onDone(); else setI(i + 1);
+    if (last) setStage('ready');
+    else { setStage('pass'); setI(i + 1); }
   };
 
   return (
     <View style={{ flex: 1 }}>
-      <Header title={`Player ${i + 1} / ${total}`} onBack={confirmCancel} />
-      {!shown ? (
-        <View style={[s.center, { padding: 24 }]}>
-          <Text style={[s.sub, { marginBottom: 12 }]}>Pass the device to</Text>
-          <Avatar uri={a.player.photo} fallback={a.player.name[0]?.toUpperCase()} size={130} />
-          <Text style={[s.title, { fontSize: 32, marginVertical: 14 }]}>{a.player.name}</Text>
-          <Text style={[s.sub, { textAlign: 'center', marginBottom: 28 }]}>Make sure nobody else is looking at the screen.</Text>
-          <Btn title="Show my role" onPress={() => setShown(true)} style={s.wide} />
-        </View>
-      ) : (
-        <ScrollView contentContainerStyle={{ alignItems: 'center', padding: 24 }}>
-          <Text style={[s.sub, { marginBottom: 10 }]}>{a.player.name}, your role is</Text>
-          <RoleAvatar role={a.role} size={150} />
-          <Text style={[s.title, { fontSize: 34, marginTop: 14 }]}>{a.role.name}</Text>
-          <Tag team={a.role.team} />
-          <Text style={[s.rowText, { fontWeight: '400', textAlign: 'center', marginVertical: 18 }]}>{a.role.desc || 'No description.'}</Text>
-          {a.role.hasAction && <Text style={[s.sub, { textAlign: 'center', marginBottom: 14 }]}>🌙 You will be woken up at night by the moderator.</Text>}
-          <Btn title={last ? 'Hide role & start the game' : 'Hide role & pass to next player'} onPress={next} style={s.wide} />
-        </ScrollView>
-      )}
+      <Header title={stage === 'ready' ? 'Ready to start' : `Player ${i + 1} / ${total}`} onBack={confirmCancel} />
+      {/* every stage uses the same scroll layout so the content always starts at the top */}
+      <ScrollView contentContainerStyle={s.revealWrap}>
+
+        {/* 1) the next player slides in from the right ("passing the device") */}
+        {stage === 'pass' && (
+          <FadeUp key={`pass-${i}`} dx={110} dy={0} duration={450} style={{ width: '100%' }}>
+            <Text style={[s.sub, { marginBottom: 10 }]}>Pass the device to</Text>
+            <Bob><PopIn delay={150} from={0.2}><Avatar uri={a.player.photo} fallback={a.player.name[0]?.toUpperCase()} size={150} /></PopIn></Bob>
+            <Text style={[s.title, { fontSize: 34, marginTop: 14 }]}>{a.player.name}</Text>
+            <View style={{ height: 26 }} />
+            <Text style={[s.sub, { textAlign: 'center', marginVertical: 18 }]}>Make sure nobody else is looking at the screen.</Text>
+            <Btn title="Show my role" onPress={() => setStage('role')} style={s.wide} />
+          </FadeUp>
+        )}
+
+        {/* 2) the role image flips + pops out with a glow and sparkles */}
+        {stage === 'role' && (
+          <View key={`role-${i}`} style={{ alignItems: 'center', width: '100%' }}>
+            <FadeUp dy={8}><Text style={[s.sub, { marginBottom: 10 }]}>{a.player.name}, your role is</Text></FadeUp>
+            <View style={{ width: 150, height: 150, alignItems: 'center', justifyContent: 'center' }}>
+              <Glow color={villain ? '#ff4d5e' : '#3ddc97'} size={200} />
+              <Burst emoji={villain ? '🔥' : '✨'} />
+              <FlipIn delay={100}><RoleAvatar role={a.role} size={150} /></FlipIn>
+            </View>
+            <FadeUp delay={450}><Text style={[s.title, { fontSize: 34, marginTop: 14 }]}>{a.role.name}</Text></FadeUp>
+            <FadeUp delay={550}><Tag team={a.role.team} /></FadeUp>
+            <FadeUp delay={700}><Text style={[s.rowText, { fontWeight: '400', textAlign: 'center', marginVertical: 18 }]}>{a.role.desc || 'No description.'}</Text></FadeUp>
+            {a.role.hasAction && <FadeUp delay={850}><Text style={[s.sub, { textAlign: 'center', marginBottom: 14 }]}>🌙 You will be woken up at night by the moderator.</Text></FadeUp>}
+            <FadeUp delay={950} style={{ width: '100%' }}>
+              <Btn title={last ? 'Hide my role' : 'Hide role & pass to next player'} onPress={next} style={s.wide} />
+            </FadeUp>
+          </View>
+        )}
+
+        {/* 3) last confirmation before Night 1 */}
+        {stage === 'ready' && (
+          <View key="ready" style={{ alignItems: 'center', width: '100%' }}>
+            <Bob amount={10} duration={1200}><PopIn from={0.2}><Text style={{ fontSize: 64, marginTop: 20 }}>🌙</Text></PopIn></Bob>
+            <FadeUp delay={200}><Text style={[s.title, { fontSize: 30, marginTop: 14, textAlign: 'center' }]}>All roles handed out</Text></FadeUp>
+            <FadeUp delay={350}>
+              <Text style={[s.sub, { textAlign: 'center', marginVertical: 18, lineHeight: 21 }]}>
+                Hand the device back to the moderator.{'\n\n'}When everyone has closed their eyes, the moderator starts Night 1.
+              </Text>
+            </FadeUp>
+            <FadeUp delay={500} style={{ width: '100%' }}>
+              <Btn title="Start the game (Night 1)" onPress={onDone} style={s.wide} />
+            </FadeUp>
+          </View>
+        )}
+      </ScrollView>
     </View>
   );
 }
@@ -583,6 +863,8 @@ function Game({ game, setGame, onExit, onRematch }) {
   const [reveal, setReveal] = useState(false);     // roles hidden by default
   const [info, setInfo] = useState(null);
   const [dismissed, setDismissed] = useState(null);
+  const [silenced, setSilenced] = useState(null);   // player silenced by the police for the day
+  const { cols, gap, cardW } = useGrid();
   const [hadVillains] = useState(() => game.assignments.some((a) => a.role.team === 'Villain'));
   const night = phase === 'night';
 
@@ -597,26 +879,35 @@ function Game({ game, setGame, onExit, onRematch }) {
     return () => clearInterval(t);
   }, [running]);
 
+  // big "Night 2" / "Day 3" banner whenever the phase changes
+  const banner = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    banner.setValue(0);
+    Animated.sequence([
+      Animated.timing(banner, { toValue: 1, duration: 350, useNativeDriver: true }),
+      Animated.delay(900),
+      Animated.timing(banner, { toValue: 0, duration: 450, useNativeDriver: true }),
+    ]).start();
+  }, [phase, day]);
+  // leaving the game goes back to the main theme
+  useEffect(() => () => Sound.setTrack('main'), []);
+
   const find = (pid) => game.assignments.find((a) => a.player.id === pid);
   const aliveList = game.assignments.filter((a) => a.alive);
 
-  // Police arrest: the arrested player's night action is blocked if they are the only holder of that role.
-  const blockedId = (() => { const p = actions.police; return p && p[0] && p[0] !== 'none' ? p[0] : null; })();
-  const isBlocked = (st) => !!blockedId && st.role.id !== 'police' && st.holders.every((h) => h.id === blockedId);
   const effective = (rid) => {
     const st = steps.find((x) => x.role.id === rid);
-    if (!st || isBlocked(st)) return null;
-    return actions[rid] || null;
+    return st ? (actions[rid] || null) : null;
   };
 
-  // What happened tonight (werewolf target vs doctor / bodyguard, with transporter swaps)
+  // What happened tonight (werewolf target vs doctor / bodyguard, transporter swaps, vampire bite)
   const outcome = () => {
     const sw = effective('transporter');
     const swapOn = sw && sw.length === 2 && !sw.includes('none');
     const swap = (id) => (!swapOn ? id : id === sw[0] ? sw[1] : id === sw[1] ? sw[0] : id);
     const tgt = (rid) => { const t = effective(rid); return t && t[0] && t[0] !== 'none' ? swap(t[0]) : null; };
-    const wolf = tgt('werewolf'); const doc = tgt('doctor'); const bg = tgt('bodyguard');
-    let victim = null; let saved = false; let guarded = null;
+    const wolf = tgt('werewolf'); const doc = tgt('doctor'); const bg = tgt('bodyguard'); const bite = tgt('vampire');
+    let victim = null; let saved = false; let guarded = null; let bitten = null;
     if (wolf) {
       if (doc === wolf) saved = true;
       else if (bg === wolf) {
@@ -624,17 +915,27 @@ function Game({ game, setGame, onExit, onRematch }) {
         if (g) { victim = g; guarded = find(wolf); } else victim = find(wolf);
       } else victim = find(wolf);
     }
-    return { victim, saved, guarded };
+    if (bite) {
+      const t = find(bite);
+      const vr = steps.find((x) => x.role.id === 'vampire');
+      if (t && vr && t.alive && t.role.team !== 'Villain' && !(victim && victim.player.id === t.player.id)) bitten = { target: t, role: vr.role };
+    }
+    return { victim, saved, guarded, bitten };
   };
 
   const toDay = () => {
-    const { victim } = outcome();
-    if (victim) {
-      setGame({ assignments: game.assignments.map((a) => (a.player.id === victim.player.id ? { ...a, alive: false } : a)) });
-      setLastNight(`${victim.player.name} was eliminated during the night.`);
-    } else {
-      setLastNight('Nobody died last night.');
-    }
+    const { victim, bitten } = outcome();
+    setGame({
+      assignments: game.assignments.map((a) => {
+        if (victim && a.player.id === victim.player.id) return { ...a, alive: false };
+        if (bitten && a.player.id === bitten.target.player.id) return { ...a, role: bitten.role };
+        return a;
+      }),
+    });
+    if (victim) Sound.play('killed');
+    setLastNight(victim ? `${victim.player.name} was eliminated during the night.` : 'Nobody died last night.');
+    const pol = actions.police;
+    setSilenced(pol && pol[0] && pol[0] !== 'none' ? pol[0] : null);
     setPhase('day');
     setLeft(discussMins * 60);
     setRunning(true);
@@ -644,13 +945,17 @@ function Game({ game, setGame, onExit, onRematch }) {
     setPhase('night');
     setRunning(false);
     setDay(day + 1);
+    setSilenced(null);
     setSteps(buildNightSteps(game.assignments));
     setStepIdx(0);
     setActions({});
     setShowHolders(false);
   };
 
-  const toggleAlive = (i) => setGame({ assignments: game.assignments.map((a, k) => (k === i ? { ...a, alive: !a.alive } : a)) });
+  const toggleAlive = (i) => {
+    if (game.assignments[i].alive) Sound.play('killed');
+    setGame({ assignments: game.assignments.map((a, k) => (k === i ? { ...a, alive: !a.alive } : a)) });
+  };
 
   const villains = aliveList.filter((a) => a.role.team === 'Villain').length;
   const towns = aliveList.length - villains;
@@ -659,6 +964,9 @@ function Game({ game, setGame, onExit, onRematch }) {
     : villains === 0 ? 'Townies win! 🎉'
     : villains >= towns ? 'Villains win! 🐺' : null;
   useEffect(() => { if (!winner) setDismissed(null); }, [winner]);
+  const gameOver = !!winner && dismissed !== winner;
+  // night music / day music
+  useEffect(() => { if (!gameOver) Sound.setTrack(night ? 'night' : 'day'); }, [night, gameOver]);
 
   const inSteps = night && stepIdx < steps.length;
   const step = inSteps ? steps[stepIdx] : null;
@@ -677,8 +985,7 @@ function Game({ game, setGame, onExit, onRematch }) {
     }
     setActions({ ...actions, [rid]: next });
   };
-  const blockedHere = !!step && isBlocked(step);
-  const seerTarget = step && rid === 'seer' && !blockedHere && picks[0] && picks[0] !== 'none' ? find(picks[0]) : null;
+  const seerTarget = step && rid === 'seer' && picks[0] && picks[0] !== 'none' ? find(picks[0]) : null;
   const goStep = (d) => { setStepIdx(stepIdx + d); setShowHolders(false); };
 
   const bg = night ? '#0d1030' : '#3a2f12';
@@ -701,7 +1008,7 @@ function Game({ game, setGame, onExit, onRematch }) {
           <ScrollView contentContainerStyle={{ padding: 16 }}>
             <View style={{ alignItems: 'center', marginBottom: 12 }}>
               <Text style={s.sub}>Step {stepIdx + 1} of {steps.length}</Text>
-              <RoleAvatar role={step.role} size={84} />
+              <PopIn key={rid} from={0.2}><RoleAvatar role={step.role} size={84} /></PopIn>
               <Text style={[s.title, { marginTop: 6 }]}>{step.role.name}</Text>
               <Text style={[s.rowText, { fontWeight: '400', textAlign: 'center', marginTop: 8 }]}>
                 “{step.role.nightPrompt || `${step.role.name}, wake up. Who do you choose?`}”
@@ -711,23 +1018,24 @@ function Game({ game, setGame, onExit, onRematch }) {
               </TouchableOpacity>
             </View>
 
-            {blockedHere && (
-              <View style={[s.row, { backgroundColor: '#5a3b12' }]}>
-                <Text style={[s.rowText, { flex: 1 }]}>⛔ {find(blockedId).player.name} was arrested — this action is blocked tonight.</Text>
-              </View>
-            )}
             <Text style={[s.label, { marginLeft: 4 }]}>{need > 1 ? `Choose ${need} players (${picks.filter((x) => x !== 'none').length}/${need})` : 'Chosen player'}</Text>
             {step.role.canTargetSame === false && <Text style={[s.sub, { marginLeft: 4, marginBottom: 6 }]}>Players with the same role can't be chosen.</Text>}
-            {targetList.map((a) => {
-              const on = picks.includes(a.player.id);
-              return (
-                <TouchableOpacity key={a.player.id} style={[s.row, on && s.rowOn]} onPress={() => toggle(a.player.id)}>
-                  <Avatar uri={a.player.photo} fallback={a.player.name[0]?.toUpperCase()} />
-                  <Text style={[s.rowText, { flex: 1 }]}>{a.player.name}</Text>
-                  {on && <Text style={{ fontSize: 22 }}>🎯</Text>}
-                </TouchableOpacity>
-              );
-            })}
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap, marginBottom: gap }}>
+              {targetList.map((a, idx) => {
+                const on = picks.includes(a.player.id);
+                return (
+                  <PopIn key={rid + a.player.id} delay={idx * 45} from={0.6} style={{ width: cardW }}>
+                    <TouchableOpacity activeOpacity={0.85} style={[s.card, { width: '100%' }, on && s.cardOn]} onPress={() => toggle(a.player.id)}>
+                      <View>
+                        <Avatar uri={a.player.photo} fallback={a.player.name[0]?.toUpperCase()} size={Math.min(72, cardW - 40)} />
+                        {on && <PopIn from={0.1} style={s.badge}><Text style={{ fontSize: 13 }}>🎯</Text></PopIn>}
+                      </View>
+                      <Text style={s.cardName} numberOfLines={1}>{a.player.name}</Text>
+                    </TouchableOpacity>
+                  </PopIn>
+                );
+              })}
+            </View>
             <TouchableOpacity style={[s.row, picks.includes('none') && s.rowOn]} onPress={() => setActions({ ...actions, [rid]: ['none'] })}>
               <Text style={[s.rowText, { flex: 1 }]}>No one / skip</Text>
               {picks.includes('none') && <Text style={{ fontSize: 22 }}>🎯</Text>}
@@ -742,7 +1050,7 @@ function Game({ game, setGame, onExit, onRematch }) {
             )}
           </ScrollView>
           <View style={[s.footer, { flexDirection: 'row', gap: 10 }]}>
-            {stepIdx > 0 && <Btn title="‹ Back" kind="ghost" onPress={() => goStep(-1)} style={{ flex: 1 }} />}
+            {stepIdx > 0 && <Btn title="‹ Back" kind="ghost" sfx="deny" onPress={() => goStep(-1)} style={{ flex: 1 }} />}
             <Btn title={stepIdx === steps.length - 1 ? 'Finish night' : 'Next role ›'} onPress={() => goStep(1)} disabled={!ready} style={{ flex: 2 }} />
           </View>
         </>
@@ -767,7 +1075,7 @@ function Game({ game, setGame, onExit, onRematch }) {
                   <RoleAvatar role={st.role} size={40} />
                   <View style={{ flex: 1 }}>
                     <Text style={s.rowText}>{st.role.name}</Text>
-                    <Text style={s.sub}>{isBlocked(st) ? '⛔ Arrested — action blocked' : t ? `→ ${names}${st.role.id === 'seer' ? ` (${t.role.team})` : ''}` : '→ No one'}</Text>
+                    <Text style={s.sub}>{t ? `→ ${names}${st.role.id === 'seer' ? ` (${t.role.team})` : ''}${st.role.id === 'police' ? ' (silenced tomorrow)' : ''}` : '→ No one'}</Text>
                   </View>
                 </View>
               );
@@ -777,6 +1085,11 @@ function Game({ game, setGame, onExit, onRematch }) {
                 {out.victim ? (out.guarded ? `🛡️ ${out.victim.player.name} will die protecting ${out.guarded.player.name}.` : `💀 ${out.victim.player.name} will be eliminated.`) : out.saved ? '🩺 The doctor saved the werewolves’ target. Nobody dies.' : 'Nobody will die tonight.'}
               </Text>
             </View>
+            {out.bitten && (
+              <View style={[s.row, { backgroundColor: '#3a1a4a' }]}>
+                <Text style={[s.rowText, { flex: 1 }]}>🧛 {out.bitten.target.player.name} will be turned into a Vampire — tell them secretly.</Text>
+              </View>
+            )}
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 8 }}>
               <Text style={s.sub}>Discussion timer:</Text>
               <TouchableOpacity style={s.stepper} onPress={() => setDiscussMins(Math.max(1, discussMins - 1))}><Text style={s.stepText}>−</Text></TouchableOpacity>
@@ -785,7 +1098,7 @@ function Game({ game, setGame, onExit, onRematch }) {
             </View>
           </ScrollView>
           <View style={[s.footer, { flexDirection: 'row', gap: 10 }]}>
-            {steps.length > 0 && <Btn title="‹ Back" kind="ghost" onPress={() => goStep(-1)} style={{ flex: 1 }} />}
+            {steps.length > 0 && <Btn title="‹ Back" kind="ghost" sfx="deny" onPress={() => goStep(-1)} style={{ flex: 1 }} />}
             <Btn title="☀️ Turn to Day" onPress={toDay} style={{ flex: 2 }} />
           </View>
         </>
@@ -796,12 +1109,13 @@ function Game({ game, setGame, onExit, onRematch }) {
         <>
           <View style={{ alignItems: 'center', paddingVertical: 8 }}>
             {!!lastNight && <Text style={[s.rowText, { marginBottom: 6, textAlign: 'center', paddingHorizontal: 16 }]}>{lastNight}</Text>}
+            {!!silenced && !!find(silenced) && <Text style={[s.rowText, { marginBottom: 6, color: '#ffcf70', textAlign: 'center', paddingHorizontal: 16 }]}>🤐 {find(silenced).player.name} is silenced and can't talk today.</Text>}
             <Text style={{ fontSize: 56, color: '#fff', fontWeight: '800', fontVariant: ['tabular-nums'] }}>{mmss(left)}</Text>
             <Text style={s.sub}>{left === 0 ? "Time's up — vote!" : running ? 'Discussion time' : 'Paused'}</Text>
             <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
-              <Btn title={running ? 'Pause' : 'Resume'} kind="ghost" disabled={left === 0} onPress={() => setRunning(!running)} style={s.small} />
-              <Btn title="+1 min" kind="ghost" onPress={() => setLeft(left + 60)} style={s.small} />
-              <Btn title="Reset" kind="ghost" onPress={() => { setLeft(discussMins * 60); setRunning(false); }} style={s.small} />
+              <Btn title={running ? 'Pause' : 'Resume'} kind="ghost" sfx="none" disabled={left === 0} onPress={() => setRunning(!running)} style={s.small} />
+              <Btn title="+1 min" kind="ghost" sfx="none" onPress={() => setLeft(left + 60)} style={s.small} />
+              <Btn title="Reset" kind="ghost" sfx="none" onPress={() => { setLeft(discussMins * 60); setRunning(false); }} style={s.small} />
             </View>
           </View>
 
@@ -811,18 +1125,19 @@ function Game({ game, setGame, onExit, onRematch }) {
           </View>
 
           <FlatList
+            key={cols} numColumns={cols} columnWrapperStyle={{ gap }}
             data={game.assignments} keyExtractor={(a) => a.player.id} contentContainerStyle={{ padding: 16 }}
-            extraData={reveal}
+            extraData={[reveal, silenced]}
             renderItem={({ item, index }) => (
-              <TouchableOpacity style={[s.row, !item.alive && { opacity: 0.4 }]} onPress={() => toggleAlive(index)} onLongPress={() => setInfo(item.role)}>
-                <Avatar uri={item.player.photo} fallback={item.player.name[0]?.toUpperCase()} />
-                <View style={{ flex: 1 }}>
-                  <Text style={[s.rowText, !item.alive && { textDecorationLine: 'line-through' }]}>{item.player.name}</Text>
-                  {reveal && <Text style={s.sub}>{item.role.name}</Text>}
+              <TouchableOpacity activeOpacity={0.85} style={[s.card, { width: cardW, marginBottom: gap }, !item.alive && { opacity: 0.4 }]} onPress={() => toggleAlive(index)} onLongPress={() => setInfo(item.role)}>
+                <View>
+                  <Avatar uri={item.player.photo} fallback={item.player.name[0]?.toUpperCase()} size={Math.min(72, cardW - 40)} />
+                  <Text style={s.stateBadge}>{item.alive ? '❤️' : '💀'}</Text>
+                  {silenced === item.player.id && <Text style={[s.stateBadge, { bottom: undefined, top: -6, right: undefined, left: -10 }]}>🤐</Text>}
                 </View>
-                {reveal && <RoleAvatar role={item.role} size={32} />}
-                {reveal && <Tag team={item.role.team} />}
-                <Text style={{ fontSize: 20, marginLeft: 8 }}>{item.alive ? '❤️' : '💀'}</Text>
+                <Text style={[s.cardName, !item.alive && { textDecorationLine: 'line-through' }]} numberOfLines={1}>{item.player.name}</Text>
+                {reveal && <Text style={s.sub} numberOfLines={1}>{item.role.name}</Text>}
+                {reveal && <View style={{ alignSelf: 'center' }}><Tag team={item.role.team} /></View>}
               </TouchableOpacity>
             )}
           />
@@ -833,6 +1148,15 @@ function Game({ game, setGame, onExit, onRematch }) {
         </>
       )}
 
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, {
+        alignItems: 'center', justifyContent: 'center',
+        backgroundColor: night ? 'rgba(5,6,25,0.88)' : 'rgba(58,40,6,0.88)', opacity: banner,
+      }]}>
+        <Animated.Text style={{ fontSize: 46, fontWeight: '800', color: '#fff', transform: [{ scale: banner.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) }] }}>
+          {night ? `🌙  Night ${day}` : `☀️  Day ${day}`}
+        </Animated.Text>
+      </Animated.View>
+
       <Modal visible={!!info} transparent animationType="fade" onRequestClose={() => setInfo(null)}>
         <View style={s.modalWrap}>
           <View style={s.modal}>
@@ -840,10 +1164,10 @@ function Game({ game, setGame, onExit, onRematch }) {
               <View style={{ alignItems: 'center' }}>
                 <RoleAvatar role={info} size={90} />
                 <Text style={[s.title, { marginTop: 8 }]}>{info.name}</Text>
-                <Tag team={info.team} />
+                <View style={{ alignSelf: 'center' }}><Tag team={info.team} /></View>
               </View>
               <Text style={[s.rowText, { marginVertical: 14, fontWeight: '400' }]}>{info.desc || 'No description.'}</Text>
-              <Btn title="Close" onPress={() => setInfo(null)} />
+              <Btn title="Close" sfx="deny" onPress={() => setInfo(null)} />
             </>)}
           </View>
         </View>
@@ -854,16 +1178,30 @@ function Game({ game, setGame, onExit, onRematch }) {
 
 /* ---------- game over ---------- */
 function GameOver({ winner, assignments, onKeep, onRematch, onExit }) {
+  // pause the theme and play the fanfare; the theme resumes when this screen closes
+  // theme pauses, the win jingle plays (after the "killed" sound if someone just died), theme resumes on close
+  useEffect(() => {
+    Sound.pauseMusic();
+    const which = winner.startsWith('Townies') ? 'victory' : winner.startsWith('Villains') ? 'villain' : 'deny';
+    const sinceKill = Date.now() - Sound.lastKilled;
+    const wait = sinceKill < 6000 ? Math.max(700, 5300 - sinceKill) : 700;
+    const t = setTimeout(() => Sound.play(which), wait);
+    return () => { clearTimeout(t); Sound.stop('victory'); Sound.stop('villain'); Sound.playMusic(); };
+  }, []);
   const townWin = winner.startsWith('Townies');
   const none = winner.startsWith('Nobody');
   return (
     <View style={{ flex: 1, backgroundColor: townWin ? '#12351f' : none ? '#25262e' : '#3a1018' }}>
       <ScrollView contentContainerStyle={{ padding: 20, alignItems: 'center' }}>
-        <Text style={{ fontSize: 64, marginTop: 10 }}>{townWin ? '🎉' : none ? '🤝' : '🐺'}</Text>
-        <Text style={[s.title, { fontSize: 30, marginVertical: 6, textAlign: 'center' }]}>{winner}</Text>
+        <View style={{ marginTop: 10, height: 84, alignItems: 'center', justifyContent: 'center' }}>
+          <Burst emoji={townWin ? '🎉' : none ? '✨' : '🔥'} count={10} radius={120} />
+          <PopIn from={0.1}><Text style={{ fontSize: 64 }}>{townWin ? '🎉' : none ? '🤝' : '🐺'}</Text></PopIn>
+        </View>
+        <FadeUp delay={300}><Text style={[s.title, { fontSize: 30, marginVertical: 6, textAlign: 'center' }]}>{winner}</Text></FadeUp>
         <Text style={[s.sub, { marginBottom: 16 }]}>Game over — here is who everyone was</Text>
-        {assignments.map((a) => (
-          <View key={a.player.id} style={[s.row, { width: '100%' }, !a.alive && { opacity: 0.65 }]}>
+        {assignments.map((a, idx) => (
+          <FadeUp key={a.player.id} delay={500 + idx * 70} dy={16} style={{ width: '100%' }}>
+          <View style={[s.row, { width: '100%' }, !a.alive && { opacity: 0.65 }]}>
             <Avatar uri={a.player.photo} fallback={a.player.name[0]?.toUpperCase()} />
             <View style={{ flex: 1 }}>
               <Text style={s.rowText}>{a.player.name}</Text>
@@ -873,10 +1211,11 @@ function GameOver({ winner, assignments, onKeep, onRematch, onExit }) {
             <Tag team={a.role.team} />
             <Text style={{ fontSize: 20 }}>{a.alive ? '❤️' : '💀'}</Text>
           </View>
+          </FadeUp>
         ))}
         <Btn title="Play again (same players)" onPress={onRematch} style={[s.wide, { marginTop: 10 }]} />
-        <Btn title="Main menu" kind="ghost" onPress={onExit} style={s.wide} />
-        <TouchableOpacity onPress={onKeep}><Text style={[s.link, { marginVertical: 8 }]}>Back to the game</Text></TouchableOpacity>
+        <Btn title="Main menu" kind="ghost" sfx="deny" onPress={onExit} style={s.wide} />
+        <TouchableOpacity onPress={() => { Sound.play('deny'); onKeep(); }}><Text style={[s.link, { marginVertical: 8 }]}>Back to the game</Text></TouchableOpacity>
       </ScrollView>
     </View>
   );
@@ -915,6 +1254,10 @@ const s = StyleSheet.create({
   cardName: { color: '#fff', fontWeight: '700', fontSize: 14, marginTop: 8, marginBottom: 2, textAlign: 'center' },
   badge: { position: 'absolute', top: -4, right: -8, width: 24, height: 24, borderRadius: 12, backgroundColor: '#2fbf84', alignItems: 'center', justifyContent: 'center' },
   miniStep: { width: 30, height: 30, borderRadius: 15, backgroundColor: '#2d3160', alignItems: 'center', justifyContent: 'center' },
+  modalFooter: { paddingTop: 10, borderTopWidth: 1, borderTopColor: '#2d3160' },
+  stateBadge: { position: 'absolute', bottom: -6, right: -10, fontSize: 18 },
+  muteBtn: { position: 'absolute', zIndex: 5, right: 16, top: Platform.OS === 'ios' ? 56 : (RNStatusBar.currentHeight || 24) + 12, width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(12,8,24,0.6)', alignItems: 'center', justifyContent: 'center' },
+  revealWrap: { alignItems: 'center', padding: 24, paddingTop: 16 },
   menuCard: { backgroundColor: 'rgba(12,8,24,0.72)', borderRadius: 20, padding: 16 },
   menuGhost: { backgroundColor: 'rgba(60,48,96,0.9)' },
 });
