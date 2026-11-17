@@ -90,6 +90,10 @@ const ROLE_ASSETS = {
   bodyguard: require('./assets/roles/bodyguard.png'),
   seer: require('./assets/roles/seer.png'),
   transporter: require('./assets/roles/transporter.png'),
+  veteran: require('./assets/roles/veteran.png'),               // placeholder art
+  executioner: require('./assets/roles/executioner.png'),       // placeholder art
+  retributionist: require('./assets/roles/retributionist.png'), // placeholder art
+  hexer: require('./assets/roles/hexer.png'),                   // placeholder art
   default: require('./assets/roles/default.png'), // used for custom roles without a picture
 };
 
@@ -102,45 +106,70 @@ const SEED4_KEY = 'ww_roles_seed_v4';
 const MUTE_KEY = 'ww_muted_v1';
 const SEED5_KEY = 'ww_roles_seed_v5';
 const SEED6_KEY = 'ww_roles_seed_v6';
+const SEED7_KEY = 'ww_roles_seed_v7';
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
 // hasAction = wakes up at night. order = who is called first (lower = earlier).
 // targets = how many players the role picks each night.
+// Extra per-role options (all editable in Available Roles):
+//   uses = how many times the night power can be used per game (0 = unlimited)
+//   startNight = first night the power can be used
+//   actsWhenDead = the power is used after the player has died (Avenger)
+//   selfAction = no player is chosen, the moderator only asks "use it or not?" (Veteran alert)
+//   targetDead = the power is aimed at a dead player (Retributionist)
+//   winOnVote = shares the win with the winning team if this player is voted out (Jester)
+//   winOnTarget = shares the win with the winning team if its random target is voted out (Executioner)
 // Rating points a player gains when their role wins (editable per role in Available Roles).
-// Townie roles are the baseline, Werewolf is higher, Vampire is lower, Jester is the highest.
-const BASE_GAIN = { villager: 15, doctor: 15, jester: 40, avenger: 15, werewolf: 25, police: 15, mayor: 15, hunter: 15, vampire: 10, bodyguard: 15, seer: 15, transporter: 15 };
+const BASE_GAIN = { villager: 15, doctor: 15, jester: 40, avenger: 15, werewolf: 25, police: 15, mayor: 15, hunter: 15, vampire: 10, bodyguard: 15, seer: 15, transporter: 15, veteran: 15, executioner: 30, retributionist: 15, hexer: 15 };
 const OLD_GAIN = { villager: 10, doctor: 10, jester: 30, avenger: 10, werewolf: 20, police: 10, mayor: 10, hunter: 10, vampire: 8, bodyguard: 10, seer: 10, transporter: 10 };
-const mk = (id, name, team, emoji, hasAction, order, targets, nightPrompt, desc) => ({
+const OLD_ORDER = { police: 1, transporter: 2, werewolf: 3, vampire: 4, bodyguard: 5, doctor: 6, seer: 7 };
+const mk = (id, name, team, emoji, hasAction, order, targets, nightPrompt, desc, extra = {}) => ({
   id, name, team, emoji, icon: null, builtIn: true, hasAction, order, targets, nightPrompt, desc,
   canTargetSame: team !== 'Villain',
   ratingGain: BASE_GAIN[id] ?? 10,
-  winOnVote: id === 'jester',   // wins alone if the town votes this player out
+  winOnVote: id === 'jester',
+  winOnTarget: false, uses: 0, startNight: 1, actsWhenDead: false, selfAction: false, targetDead: false,
+  ...extra,
 });
 const DEFAULT_ROLES = [
   mk('villager', 'Villager', 'Townie', '🧑‍🌾', false, 50, 1, '',
     'An ordinary townsperson with no special power. Find the werewolves and vote them out.'),
-  mk('doctor', 'Doctor', 'Townie', '🩺', true, 6, 1, 'Doctor, wake up. Who do you want to protect tonight?',
+  mk('doctor', 'Doctor', 'Townie', '🩺', true, 9, 1, 'Doctor, wake up. Who do you want to protect tonight?',
     'Each night, choose one player to protect from the werewolves.'),
   mk('jester', 'Jester', 'Townie', '🃏', false, 50, 1, '',
-    'You want to be voted out! If the town votes you out during the day, you win alone.'),
-  mk('avenger', 'Avenger', 'Townie', '🗡️', false, 50, 1, '',
-    'If you are eliminated, you may take one player down with you.'),
-  mk('werewolf', 'Werewolf', 'Villain', '🐺', true, 3, 1, 'Werewolves, wake up. Who do you want to eliminate tonight?',
+    'You want to be voted out! If the town votes you out you win — together with whichever team wins the game.'),
+  mk('avenger', 'Avenger', 'Townie', '🗡️', true, 12, 1, 'Avenger, wake up. You are dead — who do you want to take down with you?',
+    'After you die, on the next night you may choose one player to kill. This can be done only once.',
+    { uses: 1, actsWhenDead: true, canTargetSame: false }),
+  mk('werewolf', 'Werewolf', 'Villain', '🐺', true, 4, 1, 'Werewolves, wake up. Who do you want to eliminate tonight?',
     'Each night, the werewolves agree on one player to eliminate. Blend in during the day.'),
-  mk('police', 'Police', 'Townie', '👮', true, 1, 1, 'Police, wake up. Who do you want to silence tomorrow?',
+  mk('police', 'Police', 'Townie', '👮', true, 2, 1, 'Police, wake up. Who do you want to silence tomorrow?',
     'Each night, choose one player to silence. That player is not allowed to talk during the next day.'),
   mk('mayor', 'Mayor', 'Townie', '🎩', false, 50, 1, '',
     'Your vote counts as two votes during the day discussion and voting.'),
-  mk('hunter', 'Hunter', 'Townie', '🤠', false, 50, 1, '',
-    'When you are eliminated, you immediately shoot and eliminate one player of your choice.'),
-  mk('vampire', 'Vampire', 'Villain', '🧛', true, 4, 1, 'Vampire, wake up. Who do you want to bite tonight?',
+  mk('hunter', 'Hunter', 'Townie', '🤠', true, 7, 1, 'Hunter, wake up. Who do you want to shoot tonight?',
+    'Every night you can choose a player to kill. If you hit a Vampire you succeed. If you hit a Townie, you die the next night.',
+    { canTargetSame: false }),
+  mk('vampire', 'Vampire', 'Villain', '🧛', true, 5, 1, 'Vampire, wake up. Who do you want to bite tonight?',
     'Each night, bite one player to turn them into a vampire. Bitten players become your villain allies.'),
-  mk('bodyguard', 'Bodyguard', 'Townie', '🕶️', true, 5, 1, 'Bodyguard, wake up. Who do you want to guard tonight?',
+  mk('bodyguard', 'Bodyguard', 'Townie', '🕶️', true, 8, 1, 'Bodyguard, wake up. Who do you want to guard tonight?',
     'Each night, guard one player. If the werewolves attack them, you die in their place.'),
-  mk('seer', 'Seer', 'Townie', '🔮', true, 7, 1, 'Seer, wake up. Who do you want to check tonight?',
+  mk('seer', 'Seer', 'Townie', '🔮', true, 11, 1, 'Seer, wake up. Who do you want to check tonight?',
     'Each night, point at a player and the moderator tells you if they are a villain.'),
-  mk('transporter', 'Transporter', 'Townie', '🌀', true, 2, 2, 'Transporter, wake up. Which two players do you want to swap tonight?',
+  mk('transporter', 'Transporter', 'Townie', '🌀', true, 3, 2, 'Transporter, wake up. Which two players do you want to swap tonight?',
     'Each night, choose two players to swap places. Any night action aimed at one hits the other instead.'),
+  mk('veteran', 'Veteran', 'Townie', '💂', true, 1, 1, 'Veteran, wake up. Do you want to go on alert tonight?',
+    'You can stay alert once. While on alert, any player who visits you that night will die. This can be done only once.',
+    { selfAction: true, uses: 1 }),
+  mk('executioner', 'Executioner', 'Townie', '⚔️', false, 50, 1, '',
+    'You get a random target who must be voted out. If your target is voted out, you win (together with the winning team). If your target is killed at night, you become a Villager.',
+    { winOnTarget: true }),
+  mk('retributionist', 'Retributionist', 'Townie', '🪦', true, 10, 1, 'Retributionist, wake up. Which dead player do you want to bring back to life?',
+    'At night you can bring back to life a player who was voted out or killed, of your choice. This can be done only once.',
+    { targetDead: true, uses: 1 }),
+  mk('hexer', 'Hexer', 'Townie', '🧪', true, 6, 1, 'Hexer, wake up. Who do you want to hex tonight?',
+    'From the second night on, choose a player to cure of vampirism. If they are a Vampire they become a Villager. Can be used twice, once per night.',
+    { startNight: 2, uses: 2 }),
 ];
 
 // Makes roles saved by an older version of the app compatible (adds the new fields).
@@ -149,8 +178,7 @@ const normalizeRoles = (saved) => {
   DEFAULT_ROLES.forEach((r) => (defaults[r.id] = r));
   return saved.map((r) => {
     const d = defaults[r.id];
-    const base = { hasAction: false, order: 50, targets: 1, nightPrompt: '', canTargetSame: true, ratingGain: 10, winOnVote: false };
-    if (d) { base.hasAction = d.hasAction; base.order = d.order; base.targets = d.targets; base.nightPrompt = d.nightPrompt; base.canTargetSame = d.canTargetSame; base.ratingGain = d.ratingGain; base.winOnVote = d.winOnVote; }
+    const base = d ? { ...d } : { hasAction: false, order: 50, targets: 1, nightPrompt: '', canTargetSame: true, ratingGain: 10, winOnVote: false, winOnTarget: false, uses: 0, startNight: 1, actsWhenDead: false, selfAction: false, targetDead: false };
     return { ...base, ...r };
   });
 };
@@ -191,15 +219,137 @@ const pickImage = async () => {
   return res.canceled ? null : res.assets[0].uri;
 };
 
-// Builds the list of roles the moderator must wake up tonight (only roles with living holders).
-const buildNightSteps = (assignments) => {
+// Builds the list of roles the moderator must wake up tonight.
+// A holder is included when: the role has a night action, the holder is alive (or dead for "acts when dead" roles like the
+// Avenger), has uses left, it is late enough in the game, and (for "picks a dead player" roles) someone has died.
+const buildNightSteps = (assignments, night) => {
+  const anyDead = assignments.some((a) => !a.alive);
   const map = {};
   assignments.forEach((a) => {
-    if (!a.alive || !a.role.hasAction) return;
-    if (!map[a.role.id]) map[a.role.id] = { role: a.role, holders: [] };
-    map[a.role.id].holders.push(a.player);
+    const r = a.role;
+    if (!r.hasAction || a.doomed) return;
+    if (r.actsWhenDead ? a.alive : !a.alive) return;
+    if (r.uses > 0 && (a.used || 0) >= r.uses) return;
+    if (night < (r.startNight || 1)) return;
+    if (r.targetDead && !anyDead) return;
+    if (!map[r.id]) map[r.id] = { role: r, holders: [] };
+    map[r.id].holders.push(a.player);
   });
   return Object.values(map).sort((x, y) => (x.role.order ?? 50) - (y.role.order ?? 50));
+};
+
+const rnd = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+// Works out everything that happens during a night. Pure function: returns the new assignments + a list of events
+// for the moderator's summary. actions = { roleId: [playerId] | ['none'] | ['self'] }.
+const resolveNight = (assignments, steps, actions, villagerRole) => {
+  const A = assignments.map((a) => ({ ...a }));
+  const events = [];            // { kind: 'death' | 'info', text }
+  const dead = new Set();       // players who die tonight
+  const revived = [];
+  const byId = (id) => A.find((a) => a.player.id === id);
+  const nm = (id) => (byId(id) ? byId(id).player.name : '?');
+  const stepOf = (rid) => steps.find((st) => st.role.id === rid);
+  const picks = (rid) => (actions[rid] || []).filter((x) => x !== 'none');
+  const kill = (id, text) => { if (dead.has(id)) return; dead.add(id); events.push({ kind: 'death', text }); };
+  const info = (text) => events.push({ kind: 'info', text });
+
+  // Transporter swaps the targets of the other roles
+  const sw = picks('transporter');
+  const swapOn = !!stepOf('transporter') && sw.length === 2;
+  const swap = (id) => (!swapOn ? id : id === sw[0] ? sw[1] : id === sw[1] ? sw[0] : id);
+  const tgt = (rid) => { const p = picks(rid); return p.length && p[0] !== 'self' ? swap(p[0]) : null; };
+  if (swapOn) info(`🌀 ${nm(sw[0])} and ${nm(sw[1])} were swapped.`);
+
+  // A Hunter who shot a Townie last night dies of guilt
+  A.filter((a) => a.alive && a.doomed).forEach((a) => kill(a.player.id, `🕯️ ${a.player.name} (${a.role.name}) died of guilt for shooting a Townie.`));
+
+  // Veteran on alert: every visitor dies (one holder of each visiting role), and the Veteran survives attacks
+  const alertVets = new Set();
+  if (stepOf('veteran') && picks('veteran').includes('self')) {
+    stepOf('veteran').holders.forEach((h) => alertVets.add(h.id));
+    info('🛡️ The Veteran is on alert tonight.');
+  }
+  steps.forEach((st) => {
+    const rid = st.role.id;
+    if (rid === 'transporter' || rid === 'veteran') return;
+    const t = rid === 'retributionist' ? picks(rid)[0] : tgt(rid);
+    if (!t || !alertVets.has(t)) return;
+    const holders = st.holders.filter((h) => byId(h.id).alive && !dead.has(h.id));
+    if (holders.length) { const v = rnd(holders); kill(v.id, `💀 ${v.name} (${st.role.name}) visited the alert Veteran and died.`); }
+  });
+
+  // Attacks: Werewolves, Hunter and the dead Avenger. The Doctor saves, the alert Veteran is immune.
+  const doc = tgt('doctor');
+  const guardTarget = tgt('bodyguard');
+  const guard = A.find((a) => a.alive && a.role.id === 'bodyguard');
+  const attack = (id, label, kind) => {
+    if (!id) return false;
+    const t = byId(id);
+    if (!t || !t.alive || dead.has(id)) return false;
+    if (alertVets.has(id)) { info(`🛡️ The ${label} attack on ${t.player.name} failed — the Veteran was on alert.`); return false; }
+    if (doc === id) { info(`🩺 The Doctor saved ${t.player.name} from the ${label}.`); return false; }
+    if (kind === 'werewolf' && guardTarget === id && guard && !dead.has(guard.player.id)) {
+      kill(guard.player.id, `🛡️ ${guard.player.name} (Bodyguard) died protecting ${t.player.name}.`);
+      return false;
+    }
+    kill(id, `💀 ${t.player.name} was killed by the ${label}.`);
+    return true;
+  };
+  attack(tgt('werewolf'), 'werewolves', 'werewolf');
+  const shotId = tgt('hunter');
+  if (attack(shotId, 'Hunter', 'hunter') && byId(shotId).role.team === 'Townie') {
+    const hh = byId(stepOf('hunter').holders[0].id);
+    hh.doomed = true;
+    info(`🕯️ ${hh.player.name} (Hunter) shot a Townie and will die next night.`);
+  }
+  attack(tgt('avenger'), 'Avenger', 'avenger');
+
+  // Hexer cures a Vampire (becomes a Villager). This happens before the bite.
+  const hexId = tgt('hexer');
+  if (hexId) {
+    const t = byId(hexId);
+    if (t && t.alive && !dead.has(hexId) && t.role.id === 'vampire') {
+      t.role = villagerRole;
+      info(`🧪 ${t.player.name} was a Vampire — now a Villager.`);
+    } else if (t) info(`🧪 ${t.player.name} is not a Vampire — the hex had no effect.`);
+  }
+
+  // Vampire bite
+  const vStep = stepOf('vampire');
+  const biteId = tgt('vampire');
+  if (vStep && biteId) {
+    const t = byId(biteId);
+    const stillVamp = vStep.holders.some((h) => byId(h.id).alive && !dead.has(h.id) && byId(h.id).role.id === 'vampire');
+    if (stillVamp && t && t.alive && !dead.has(biteId) && t.role.team !== 'Villain' && !alertVets.has(biteId)) {
+      t.role = vStep.role;
+      info(`🧛 ${t.player.name} was bitten and becomes a Vampire — tell them secretly.`);
+    }
+  }
+
+  // Retributionist revives a dead player
+  const retId = picks('retributionist')[0];
+  if (retId) {
+    const t = byId(retId);
+    if (t && !t.alive) { t.alive = true; t.votedOut = false; t.doomed = false; revived.push(retId); info(`✨ ${t.player.name} will be brought back to life.`); }
+  }
+
+  // Powers with limited uses are used up
+  steps.forEach((st) => {
+    if (!(st.role.uses > 0)) return;
+    if ((actions[st.role.id] || []).some((x) => x !== 'none')) st.holders.forEach((h) => { const x = byId(h.id); x.used = (x.used || 0) + 1; });
+  });
+
+  // Executioner: if the target dies at night (not by a vote) the Executioner becomes a Villager
+  A.forEach((a) => {
+    if (a.role.winOnTarget && !a.won && a.target && dead.has(a.target)) {
+      info(`⚔️ ${a.player.name}'s target (${nm(a.target)}) died at night — the Executioner becomes a Villager.`);
+      a.role = villagerRole;
+    }
+  });
+
+  dead.forEach((id) => { const a = byId(id); a.alive = false; a.votedOut = false; });
+  return { assignments: A, events, deaths: [...dead], revived };
 };
 
 /* ---------- animation helpers (built-in Animated API, no extra packages) ---------- */
@@ -432,6 +582,22 @@ export default function App() {
           list = list.map((x) => (x.builtIn && BASE_GAIN[x.id] != null && (x.ratingGain == null || x.ratingGain === OLD_GAIN[x.id]) ? { ...x, ratingGain: BASE_GAIN[x.id] } : x));
           await AsyncStorage.setItem(SEED6_KEY, '1');
         }
+        const seeded7 = await AsyncStorage.getItem(SEED7_KEY);
+        if (!seeded7) {   // one-time: new Hunter / Avenger / Jester rules, new night order, and the 4 new roles
+          const defs = {};
+          DEFAULT_ROLES.forEach((d) => (defs[d.id] = d));
+          const have = new Set(list.map((x) => x.id));
+          const redo = ['hunter', 'avenger', 'jester'];
+          list = list.map((x) => {
+            const d = defs[x.id];
+            if (!d || !x.builtIn) return x;
+            if (redo.includes(x.id)) return { ...d, icon: x.icon || null, ratingGain: x.ratingGain ?? d.ratingGain };
+            if (x.order === OLD_ORDER[x.id]) return { ...x, order: d.order };
+            return x;
+          });
+          DEFAULT_ROLES.forEach((d) => { if (!have.has(d.id)) list.push(d); });
+          await AsyncStorage.setItem(SEED7_KEY, '1');
+        }
         setRoles(list);
       } catch (e) {}
       setLoaded(true);
@@ -479,7 +645,14 @@ export default function App() {
         const pool = [];
         roles.forEach((r) => { for (let i = 0; i < (counts[r.id] || 0); i++) pool.push(r); });
         const shuffled = shuffle(pool);
-        setGame({ assignments: selectedPlayers.map((p, i) => ({ player: p, role: shuffled[i], alive: true })) });
+        const asg = selectedPlayers.map((p, i) => ({ player: p, role: shuffled[i], alive: true }));
+        // an Executioner gets a random target (any other player)
+        const withTargets = asg.map((a) => {
+          if (!a.role.winOnTarget) return a;
+          const others = asg.filter((x) => x.player.id !== a.player.id);
+          return others.length ? { ...a, target: others[Math.floor(Math.random() * others.length)].player.id } : a;
+        });
+        setGame({ assignments: withTargets });
         setScreen('reveal');
       }} />
   );
@@ -488,7 +661,7 @@ export default function App() {
       onCancel={() => { setGame(null); setScreen('assign'); }}
       onDone={() => setScreen('game')} />
   );
-  else if (screen === 'game' && game) body = <Game game={game} setGame={setGame} onExit={() => { setGame(null); setScreen('home'); }} onRematch={() => { setGame(null); setScreen('assign'); }} onAward={awardGains} />;
+  else if (screen === 'game' && game) body = <Game game={game} setGame={setGame} roles={roles} onExit={() => { setGame(null); setScreen('home'); }} onRematch={() => { setGame(null); setScreen('assign'); }} onAward={awardGains} />;
 
   if (loaded && screen === 'home') {
     return (
@@ -592,6 +765,26 @@ function Library({ players, setPlayers, onBack }) {
 }
 
 /* ---------- available roles ---------- */
+const SwitchRow = ({ title, sub, value, onChange }) => (
+  <View style={[s.row, { marginTop: 6 }]}>
+    <View style={{ flex: 1 }}>
+      <Text style={s.rowText}>{title}</Text>
+      {!!sub && <Text style={s.sub}>{sub}</Text>}
+    </View>
+    <Switch value={!!value} onValueChange={onChange} />
+  </View>
+);
+const StepRow = ({ label, value, onChange, min = 0, max = 9 }) => (
+  <>
+    <Text style={s.label}>{label}</Text>
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 6 }}>
+      <TouchableOpacity style={s.stepper} onPress={() => onChange(Math.max(min, value - 1))}><Text style={s.stepText}>−</Text></TouchableOpacity>
+      <Text style={s.rowText}>{value}</Text>
+      <TouchableOpacity style={s.stepper} onPress={() => onChange(Math.min(max, value + 1))}><Text style={s.stepText}>＋</Text></TouchableOpacity>
+    </View>
+  </>
+);
+
 function Roles({ roles, setRoles, onBack }) {
   const [editing, setEditing] = useState(null);
   const save = () => {
@@ -609,7 +802,7 @@ function Roles({ roles, setRoles, onBack }) {
       { text: 'Delete', style: 'destructive', onPress: () => { setRoles(roles.filter((x) => x.id !== r.id)); setEditing(null); } },
     ]);
   };
-  const blank = { name: '', team: 'Townie', desc: '', icon: null, hasAction: false, order: 50, targets: 1, nightPrompt: '', canTargetSame: true, ratingGain: 10, winOnVote: false };
+  const blank = { name: '', team: 'Townie', desc: '', icon: null, hasAction: false, order: 50, targets: 1, nightPrompt: '', canTargetSame: true, ratingGain: 10, winOnVote: false, winOnTarget: false, uses: 0, startNight: 1, actsWhenDead: false, selfAction: false, targetDead: false };
   return (
     <View style={{ flex: 1 }}>
       <Header title="Available Roles" onBack={onBack} right={<TouchableOpacity onPress={() => setEditing(blank)}><Text style={s.link}>＋ Add</Text></TouchableOpacity>} />
@@ -621,7 +814,7 @@ function Roles({ roles, setRoles, onBack }) {
             <View style={{ flex: 1 }}>
               <Text style={[s.rowText, { fontSize: 19 }]}>{item.name}{item.hasAction ? '  🌙' : ''}</Text>
               <Text style={s.sub} numberOfLines={2}>{item.desc}</Text>
-              <Text style={[s.sub, { color: '#ffd66b', marginTop: 2 }]}>⭐ +{item.ratingGain ?? 10} on win{item.winOnVote ? ' · wins if voted out' : ''}</Text>
+              <Text style={[s.sub, { color: '#ffd66b', marginTop: 2 }]}>⭐ +{item.ratingGain ?? 10} on win{item.winOnVote ? ' · wins if voted out' : ''}{item.winOnTarget ? ' · wins if its target is voted out' : ''}</Text>
             </View>
             <Tag team={item.team} />
           </TouchableOpacity>
@@ -659,13 +852,10 @@ function Roles({ roles, setRoles, onBack }) {
                   <Text style={s.rowText}>⭐ +{editing.ratingGain ?? 10}</Text>
                   <TouchableOpacity style={s.stepper} onPress={() => setEditing({ ...editing, ratingGain: Math.min(100, (editing.ratingGain ?? 10) + 5) })}><Text style={s.stepText}>＋</Text></TouchableOpacity>
                 </View>
-                <View style={[s.row, { marginTop: 6 }]}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.rowText}>Wins alone when voted out</Text>
-                    <Text style={s.sub}>Like the Jester: the game ends when this player is voted out in the day</Text>
-                  </View>
-                  <Switch value={!!editing.winOnVote} onValueChange={(v) => setEditing({ ...editing, winOnVote: v })} />
-                </View>
+                <SwitchRow title="Wins if voted out" sub="Like the Jester: shares the win with the winning team if voted out in the day"
+                  value={editing.winOnVote} onChange={(v) => setEditing({ ...editing, winOnVote: v })} />
+                <SwitchRow title="Wins if its target is voted out" sub="Like the Executioner: gets a random target at the start of the game"
+                  value={editing.winOnTarget} onChange={(v) => setEditing({ ...editing, winOnTarget: v })} />
 
                 <View style={[s.row, { marginTop: 6 }]}>
                   <View style={{ flex: 1 }}>
@@ -694,6 +884,14 @@ function Roles({ roles, setRoles, onBack }) {
                     </View>
                     <Switch value={editing.canTargetSame !== false} onValueChange={(v) => setEditing({ ...editing, canTargetSame: v })} />
                   </View>
+                  <StepRow label="Uses per game (0 = unlimited)" value={editing.uses ?? 0} min={0} max={9} onChange={(v) => setEditing({ ...editing, uses: v })} />
+                  <StepRow label="First night it can act" value={editing.startNight ?? 1} min={1} max={9} onChange={(v) => setEditing({ ...editing, startNight: v })} />
+                  <SwitchRow title="No player target" sub="Moderator only asks use it or skip (like the Veteran's alert)"
+                    value={editing.selfAction} onChange={(v) => setEditing({ ...editing, selfAction: v })} />
+                  <SwitchRow title="Acts after death" sub="Wakes up only once the player is dead (like the Avenger)"
+                    value={editing.actsWhenDead} onChange={(v) => setEditing({ ...editing, actsWhenDead: v })} />
+                  <SwitchRow title="Picks a dead player" sub="Aimed at dead players (like the Retributionist)"
+                    value={editing.targetDead} onChange={(v) => setEditing({ ...editing, targetDead: v })} />
                   <Text style={s.label}>What the moderator asks at night</Text>
                   <TextInput style={[s.input, { height: 70, textAlignVertical: 'top' }]} multiline placeholder="e.g. Doctor, wake up. Who do you want to protect?" placeholderTextColor="#777" value={editing.nightPrompt} onChangeText={(t) => setEditing({ ...editing, nightPrompt: t })} />
                 </>)}
@@ -822,6 +1020,7 @@ function RevealRoles({ game, onCancel, onDone }) {
   const a = game.assignments[i];
   const last = i === total - 1;
   const villain = a.role.team === 'Villain';
+  const targetA = a.target ? game.assignments.find((x) => x.player.id === a.target) : null;   // Executioner's target
 
   const confirmCancel = () =>
     Alert.alert('Cancel role reveal?', 'Roles will be dealt again next time.', [
@@ -865,6 +1064,7 @@ function RevealRoles({ game, onCancel, onDone }) {
             <FadeUp delay={550}><Tag team={a.role.team} /></FadeUp>
             <FadeUp delay={700}><Text style={[s.rowText, { fontWeight: '400', textAlign: 'center', marginVertical: 18 }]}>{a.role.desc || 'No description.'}</Text></FadeUp>
             {a.role.hasAction && <FadeUp delay={850}><Text style={[s.sub, { textAlign: 'center', marginBottom: 14 }]}>🌙 You will be woken up at night by the moderator.</Text></FadeUp>}
+            {!!targetA && <FadeUp delay={850}><Text style={[s.rowText, { textAlign: 'center', color: '#ffd66b', marginBottom: 14 }]}>🎯 Your target: {targetA.player.name}</Text></FadeUp>}
             <FadeUp delay={950} style={{ width: '100%' }}>
               <Btn title={last ? 'Hide my role' : 'Hide role & pass to next player'} onPress={next} style={s.wide} />
             </FadeUp>
@@ -892,15 +1092,18 @@ function RevealRoles({ game, onCancel, onDone }) {
 }
 
 /* ---------- game (moderator) ---------- */
-function Game({ game, setGame, onExit, onRematch, onAward }) {
+function Game({ game, setGame, roles, onExit, onRematch, onAward }) {
   useKeepAwake();
+  const villagerRole = (roles || []).find((r) => r.id === 'villager') || DEFAULT_ROLES[0];
   const [phase, setPhase] = useState('night');
   const [day, setDay] = useState(1);
-  const [steps, setSteps] = useState(() => buildNightSteps(game.assignments));
+  const [steps, setSteps] = useState(() => buildNightSteps(game.assignments, 1));
   const [stepIdx, setStepIdx] = useState(0);
-  const [actions, setActions] = useState({});      // roleId -> playerId | 'none'
+  const [actions, setActions] = useState({});      // roleId -> [playerId] | ['none'] | ['self']
   const [showHolders, setShowHolders] = useState(false);
   const [lastNight, setLastNight] = useState('');
+  const [voteMsg, setVoteMsg] = useState('');
+  const [sel, setSel] = useState(null);            // player selected in the day, waiting for the moderator to confirm the vote
   const [discussMins, setDiscussMins] = useState(5);
   const [left, setLeft] = useState(0);
   const [running, setRunning] = useState(false);
@@ -937,48 +1140,27 @@ function Game({ game, setGame, onExit, onRematch, onAward }) {
 
   const find = (pid) => game.assignments.find((a) => a.player.id === pid);
   const aliveList = game.assignments.filter((a) => a.alive);
+  const inSteps = night && stepIdx < steps.length;
 
-  const effective = (rid) => {
-    const st = steps.find((x) => x.role.id === rid);
-    return st ? (actions[rid] || null) : null;
-  };
-
-  // What happened tonight (werewolf target vs doctor / bodyguard, transporter swaps, vampire bite)
-  const outcome = () => {
-    const sw = effective('transporter');
-    const swapOn = sw && sw.length === 2 && !sw.includes('none');
-    const swap = (id) => (!swapOn ? id : id === sw[0] ? sw[1] : id === sw[1] ? sw[0] : id);
-    const tgt = (rid) => { const t = effective(rid); return t && t[0] && t[0] !== 'none' ? swap(t[0]) : null; };
-    const wolf = tgt('werewolf'); const doc = tgt('doctor'); const bg = tgt('bodyguard'); const bite = tgt('vampire');
-    let victim = null; let saved = false; let guarded = null; let bitten = null;
-    if (wolf) {
-      if (doc === wolf) saved = true;
-      else if (bg === wolf) {
-        const g = game.assignments.find((x) => x.alive && x.role.id === 'bodyguard');
-        if (g) { victim = g; guarded = find(wolf); } else victim = find(wolf);
-      } else victim = find(wolf);
-    }
-    if (bite) {
-      const t = find(bite);
-      const vr = steps.find((x) => x.role.id === 'vampire');
-      if (t && vr && t.alive && t.role.team !== 'Villain' && !(victim && victim.player.id === t.player.id)) bitten = { target: t, role: vr.role };
-    }
-    return { victim, saved, guarded, bitten };
-  };
+  // Everything that happens tonight (computed once per set of choices so random results stay stable)
+  const res = useMemo(
+    () => (night && stepIdx >= steps.length ? resolveNight(game.assignments, steps, actions, villagerRole) : null),
+    [night, stepIdx, steps, actions, game.assignments, villagerRole],
+  );
 
   const toDay = () => {
-    const { victim, bitten } = outcome();
-    setGame({
-      assignments: game.assignments.map((a) => {
-        if (victim && a.player.id === victim.player.id) return { ...a, alive: false };
-        if (bitten && a.player.id === bitten.target.player.id) return { ...a, role: bitten.role };
-        return a;
-      }),
-    });
-    if (victim) Sound.play('killed');
-    setLastNight(victim ? `${victim.player.name} was eliminated during the night.` : 'Nobody died last night.');
+    const r = res;
+    setGame({ assignments: r.assignments });
+    const nm = (ids) => ids.map((id) => find(id).player.name).join(', ');
+    let msg = r.deaths.length ? `${nm(r.deaths)} ${r.deaths.length > 1 ? 'were' : 'was'} eliminated during the night.` : 'Nobody died last night.';
+    if (r.revived.length) msg += ` ${nm(r.revived)} returned from the dead!`;
+    if (r.deaths.length) Sound.play('killed');   // killed.wav only for night kills, never for day votes
+    setLastNight(msg);
+    setVoteMsg('');
+    setSel(null);
     const pol = actions.police;
-    setSilenced(pol && pol[0] && pol[0] !== 'none' ? pol[0] : null);
+    const pid = pol && pol[0] && pol[0] !== 'none' ? pol[0] : null;
+    setSilenced(pid && r.assignments.some((a) => a.player.id === pid && a.alive) ? pid : null);
     setPhase('day');
     setLeft(discussMins * 60);
     setRunning(true);
@@ -989,39 +1171,73 @@ function Game({ game, setGame, onExit, onRematch, onAward }) {
     setRunning(false);
     setDay(day + 1);
     setSilenced(null);
-    setSteps(buildNightSteps(game.assignments));
+    setSel(null);
+    setVoteMsg('');
+    setSteps(buildNightSteps(game.assignments, day + 1));
     setStepIdx(0);
     setActions({});
     setShowHolders(false);
   };
 
-  // tapping a player in the day = the town voted them out (no "killed" sound; that is only for night kills)
-  const toggleAlive = (i) => {
-    setGame({ assignments: game.assignments.map((a, k) => (k === i ? { ...a, alive: !a.alive, votedOut: a.alive } : a)) });
+  // Day: tap a player to SELECT them, then confirm with the button at the bottom (no killed sound for votes)
+  const selA = sel ? find(sel) : null;
+  const voteOut = () => {
+    if (!selA) return;
+    const pid = selA.player.id;
+    let msg = `${selA.player.name} was voted out.`;
+    if (selA.role.winOnVote) msg += ` 🃏 ${selA.role.name} — the game continues!`;
+    game.assignments.forEach((a) => { if (a.role.winOnTarget && a.alive && a.target === pid) msg += ` ⚔️ ${a.player.name} (${a.role.name}) got their target!`; });
+    setGame({
+      assignments: game.assignments.map((a) => {
+        if (a.player.id === pid) return { ...a, alive: false, votedOut: true };
+        if (a.role.winOnTarget && a.alive && a.target === pid) return { ...a, won: true };
+        return a;
+      }),
+    });
+    setVoteMsg(msg);
+    setSel(null);
+  };
+  const bringBack = () => {
+    if (!selA) return;
+    const pid = selA.player.id;
+    setGame({
+      assignments: game.assignments.map((a) => {
+        if (a.player.id === pid) return { ...a, alive: true, votedOut: false, doomed: false };
+        if (a.role.winOnTarget && a.target === pid) return { ...a, won: false };
+        return a;
+      }),
+    });
+    setVoteMsg(`${selA.player.name} is back in the game.`);
+    setSel(null);
   };
 
+  // Win check: Townies / Villains decide the game. Jester (voted out) and Executioner (target voted out) share the win.
   const villains = aliveList.filter((a) => a.role.team === 'Villain').length;
   const towns = aliveList.length - villains;
-  // a "wins when voted out" role (Jester) that was voted out ends the game with a solo win
-  const jesterWin = game.assignments.find((a) => a.role.winOnVote && a.votedOut && !a.alive);
-  const winInfo = jesterWin ? { kind: 'solo', text: `${jesterWin.role.name} wins! 🃏` }
-    : aliveList.length === 0 ? { kind: 'none', text: 'Nobody wins 🤝' }
-    : villains === 0 ? { kind: 'townie', text: 'Townies win! 🎉' }
-    : villains >= towns ? { kind: 'villain', text: 'Villains win! 🐺' } : null;
-  const winner = winInfo ? winInfo.text : null;
-  useEffect(() => { if (!winner) setDismissed(null); }, [winner]);
-  const gameOver = !!winner && dismissed !== winner;
+  const baseKind = aliveList.length === 0 ? 'none' : villains === 0 ? 'townie' : villains >= towns ? 'villain' : null;
+  const co = game.assignments.filter((a) => (a.role.winOnVote && a.votedOut && !a.alive) || (a.role.winOnTarget && a.won));
+  const coNames = [...new Set(co.map((a) => a.role.name))];
+  const winText = !baseKind ? null
+    : baseKind === 'none' ? 'Nobody wins 🤝'
+    : `${baseKind === 'townie' ? 'Townies win' : 'Villains win'}${coNames.length ? ` with ${coNames.join(' & ')}` : ''}! ${baseKind === 'townie' ? '🎉' : '🐺'}`;
+  const winKey = baseKind ? `${baseKind}:${co.map((a) => a.player.id).sort().join(',')}` : null;
+  const winner = winText;
+  useEffect(() => { if (!winKey) setDismissed(null); }, [winKey]);
+  const gameOver = !!winKey && dismissed !== winKey;
   // night music / day music
   useEffect(() => { if (!gameOver) Sound.setTrack(night ? 'night' : 'day'); }, [night, gameOver]);
 
-  const inSteps = night && stepIdx < steps.length;
   const step = inSteps ? steps[stepIdx] : null;
   const rid = step ? step.role.id : null;
-  // roles with canTargetSame === false (e.g. werewolf) cannot pick players holding the same role
-  const targetList = step ? aliveList.filter((a) => step.role.canTargetSame !== false || a.role.id !== rid) : [];
+  const selfOnly = !!(step && step.role.selfAction);
+  // roles with canTargetSame === false (e.g. werewolf, hunter) cannot pick players holding the same role;
+  // "picks a dead player" roles (Retributionist) choose among the dead
+  const targetList = step
+    ? (step.role.targetDead ? game.assignments.filter((a) => !a.alive) : aliveList.filter((a) => step.role.canTargetSame !== false || a.role.id !== rid))
+    : [];
   const need = step ? Math.max(1, Math.min(step.role.targets || 1, targetList.length)) : 1;
   const picks = step ? (actions[rid] || []) : [];
-  const ready = picks.includes('none') || picks.length === need;
+  const ready = picks.includes('none') || picks.includes('self') || picks.length === need;
   const toggle = (pid) => {
     let next;
     if (need === 1) next = [pid];
@@ -1031,14 +1247,16 @@ function Game({ game, setGame, onExit, onRematch, onAward }) {
     }
     setActions({ ...actions, [rid]: next });
   };
-  const seerTarget = step && rid === 'seer' && picks[0] && picks[0] !== 'none' ? find(picks[0]) : null;
+  const firstPick = picks.find((x) => x !== 'none' && x !== 'self');
+  const seerTarget = step && rid === 'seer' && firstPick ? find(firstPick) : null;
+  const hexTarget = step && rid === 'hexer' && firstPick ? find(firstPick) : null;
+  const usesLeft = step && step.role.uses > 0 ? Math.max(0, ...step.holders.map((h) => step.role.uses - ((find(h.id) || {}).used || 0))) : null;
   const goStep = (d) => { setStepIdx(stepIdx + d); setShowHolders(false); };
 
   const bg = night ? '#0d1030' : '#3a2f12';
-  const out = night && !inSteps ? outcome() : null;
 
-  if (winner && dismissed !== winner) {
-    return <GameOver winner={winner} winKind={winInfo.kind} assignments={game.assignments} onKeep={() => setDismissed(winner)} onAward={onAward} onRematch={onRematch} onExit={onExit} />;
+  if (gameOver) {
+    return <GameOver winner={winner} winKind={baseKind} assignments={game.assignments} onKeep={() => setDismissed(winKey)} onAward={onAward} onRematch={onRematch} onExit={onExit} />;
   }
 
   return (
@@ -1059,38 +1277,64 @@ function Game({ game, setGame, onExit, onRematch, onAward }) {
               <Text style={[s.rowText, { fontWeight: '400', textAlign: 'center', marginTop: 8 }]}>
                 “{step.role.nightPrompt || `${step.role.name}, wake up. Who do you choose?`}”
               </Text>
+              {usesLeft != null && <Text style={[s.sub, { marginTop: 6 }]}>Uses left: {usesLeft}</Text>}
               <TouchableOpacity onPress={() => setShowHolders(!showHolders)} style={{ marginTop: 8 }}>
                 <Text style={s.link}>{showHolders ? `Playing: ${step.holders.map((p) => p.name).join(', ')}` : 'Show who has this role'}</Text>
               </TouchableOpacity>
             </View>
 
-            <Text style={[s.label, { marginLeft: 4 }]}>{need > 1 ? `Choose ${need} players (${picks.filter((x) => x !== 'none').length}/${need})` : 'Chosen player'}</Text>
-            {step.role.canTargetSame === false && <Text style={[s.sub, { marginLeft: 4, marginBottom: 6 }]}>Players with the same role can't be chosen.</Text>}
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap, marginBottom: gap }}>
-              {targetList.map((a, idx) => {
-                const on = picks.includes(a.player.id);
-                return (
-                  <PopIn key={rid + a.player.id} delay={idx * 45} from={0.6} style={{ width: cardW }}>
-                    <TouchableOpacity activeOpacity={0.85} style={[s.card, { width: '100%' }, on && s.cardOn]} onPress={() => toggle(a.player.id)}>
-                      <View>
-                        <Avatar uri={a.player.photo} fallback={a.player.name[0]?.toUpperCase()} size={Math.min(72, cardW - 40)} />
-                        {on && <PopIn from={0.1} style={s.badge}><Text style={{ fontSize: 13 }}>🎯</Text></PopIn>}
-                      </View>
-                      <Text style={s.cardName} numberOfLines={1}>{a.player.name}</Text>
-                    </TouchableOpacity>
-                  </PopIn>
-                );
-              })}
-            </View>
-            <TouchableOpacity style={[s.row, picks.includes('none') && s.rowOn]} onPress={() => setActions({ ...actions, [rid]: ['none'] })}>
-              <Text style={[s.rowText, { flex: 1 }]}>No one / skip</Text>
-              {picks.includes('none') && <Text style={{ fontSize: 22 }}>🎯</Text>}
-            </TouchableOpacity>
+            {selfOnly ? (
+              <>
+                <TouchableOpacity style={[s.row, picks.includes('self') && s.rowOn]} onPress={() => setActions({ ...actions, [rid]: ['self'] })}>
+                  <Text style={[s.rowText, { flex: 1 }]}>🛡️ Go on alert tonight</Text>
+                  {picks.includes('self') && <Text style={{ fontSize: 22 }}>🎯</Text>}
+                </TouchableOpacity>
+                <TouchableOpacity style={[s.row, picks.includes('none') && s.rowOn]} onPress={() => setActions({ ...actions, [rid]: ['none'] })}>
+                  <Text style={[s.rowText, { flex: 1 }]}>🏠 Stay home (keep the power)</Text>
+                  {picks.includes('none') && <Text style={{ fontSize: 22 }}>🎯</Text>}
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Text style={[s.label, { marginLeft: 4 }]}>
+                  {step.role.targetDead ? 'Choose a dead player' : need > 1 ? `Choose ${need} players (${picks.filter((x) => x !== 'none').length}/${need})` : 'Chosen player'}
+                </Text>
+                {step.role.canTargetSame === false && !step.role.targetDead && <Text style={[s.sub, { marginLeft: 4, marginBottom: 6 }]}>Players with the same role can't be chosen.</Text>}
+                {targetList.length === 0 && <Text style={[s.sub, { marginLeft: 4, marginBottom: 6 }]}>Nobody can be chosen.</Text>}
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap, marginBottom: gap }}>
+                  {targetList.map((a, idx) => {
+                    const on = picks.includes(a.player.id);
+                    return (
+                      <PopIn key={rid + a.player.id} delay={idx * 45} from={0.6} style={{ width: cardW }}>
+                        <TouchableOpacity activeOpacity={0.85} style={[s.card, { width: '100%' }, on && s.cardOn]} onPress={() => toggle(a.player.id)}>
+                          <View>
+                            <Avatar uri={a.player.photo} fallback={a.player.name[0]?.toUpperCase()} size={Math.min(72, cardW - 40)} />
+                            {on && <PopIn from={0.1} style={s.badge}><Text style={{ fontSize: 13 }}>🎯</Text></PopIn>}
+                          </View>
+                          <Text style={s.cardName} numberOfLines={1}>{a.player.name}</Text>
+                        </TouchableOpacity>
+                      </PopIn>
+                    );
+                  })}
+                </View>
+                <TouchableOpacity style={[s.row, picks.includes('none') && s.rowOn]} onPress={() => setActions({ ...actions, [rid]: ['none'] })}>
+                  <Text style={[s.rowText, { flex: 1 }]}>No one / skip</Text>
+                  {picks.includes('none') && <Text style={{ fontSize: 22 }}>🎯</Text>}
+                </TouchableOpacity>
+              </>
+            )}
 
             {seerTarget && (
               <View style={[s.row, { justifyContent: 'center', backgroundColor: seerTarget.role.team === 'Villain' ? '#5a1b25' : '#1b4d38' }]}>
                 <Text style={s.rowText}>
                   🔮 {seerTarget.player.name} is a {seerTarget.role.team === 'Villain' ? 'VILLAIN 🐺' : 'TOWNIE 🏘️'}
+                </Text>
+              </View>
+            )}
+            {hexTarget && (
+              <View style={[s.row, { justifyContent: 'center', backgroundColor: hexTarget.role.id === 'vampire' ? '#3a1a4a' : '#262a4d' }]}>
+                <Text style={s.rowText}>
+                  🧪 {hexTarget.player.name} {hexTarget.role.id === 'vampire' ? 'is a Vampire — they become a Villager!' : 'is not a Vampire — nothing happens.'}
                 </Text>
               </View>
             )}
@@ -1103,7 +1347,7 @@ function Game({ game, setGame, onExit, onRematch, onAward }) {
       )}
 
       {/* ---------- NIGHT: summary ---------- */}
-      {night && !inSteps && (
+      {night && !inSteps && res && (
         <>
           <ScrollView contentContainerStyle={{ padding: 16 }}>
             <View style={{ alignItems: 'center', marginBottom: 12 }}>
@@ -1111,30 +1355,34 @@ function Game({ game, setGame, onExit, onRematch, onAward }) {
               <Text style={s.title}>Night summary</Text>
               <Text style={s.sub}>Only you (the moderator) should see this.</Text>
             </View>
-            {steps.length === 0 && <Text style={[s.sub, { textAlign: 'center' }]}>No roles with a night action are alive.</Text>}
+            {steps.length === 0 && <Text style={[s.sub, { textAlign: 'center' }]}>No roles with a night action are available tonight.</Text>}
             {steps.map((st) => {
-              const ids = (actions[st.role.id] || []).filter((x) => x !== 'none');
+              const acts = actions[st.role.id] || [];
+              const ids = acts.filter((x) => x !== 'none' && x !== 'self');
               const t = ids.length ? find(ids[0]) : null;
               const names = ids.map((id) => find(id).player.name).join(st.role.id === 'transporter' ? ' ↔ ' : ', ');
+              const line = st.role.selfAction ? (acts.includes('self') ? '→ On alert' : '→ Stayed home')
+                : t ? `→ ${names}${st.role.id === 'seer' ? ` (${t.role.team})` : ''}${st.role.id === 'police' ? ' (silenced tomorrow)' : ''}` : '→ No one';
               return (
                 <View key={st.role.id} style={s.row}>
                   <RoleAvatar role={st.role} size={40} />
                   <View style={{ flex: 1 }}>
                     <Text style={s.rowText}>{st.role.name}</Text>
-                    <Text style={s.sub}>{t ? `→ ${names}${st.role.id === 'seer' ? ` (${t.role.team})` : ''}${st.role.id === 'police' ? ' (silenced tomorrow)' : ''}` : '→ No one'}</Text>
+                    <Text style={s.sub}>{line}</Text>
                   </View>
                 </View>
               );
             })}
-            <View style={[s.row, { backgroundColor: '#2b2250' }]}>
-              <Text style={[s.rowText, { flex: 1 }]}>
-                {out.victim ? (out.guarded ? `🛡️ ${out.victim.player.name} will die protecting ${out.guarded.player.name}.` : `💀 ${out.victim.player.name} will be eliminated.`) : out.saved ? '🩺 The doctor saved the werewolves’ target. Nobody dies.' : 'Nobody will die tonight.'}
-              </Text>
-            </View>
-            {out.bitten && (
-              <View style={[s.row, { backgroundColor: '#3a1a4a' }]}>
-                <Text style={[s.rowText, { flex: 1 }]}>🧛 {out.bitten.target.player.name} will be turned into a Vampire — tell them secretly.</Text>
+            {res.events.length === 0 && (
+              <View style={[s.row, { backgroundColor: '#2b2250' }]}><Text style={[s.rowText, { flex: 1 }]}>Nobody will die tonight.</Text></View>
+            )}
+            {res.events.map((e, i) => (
+              <View key={i} style={[s.row, { backgroundColor: e.kind === 'death' ? '#4a1d28' : '#2b2250' }]}>
+                <Text style={[s.rowText, { flex: 1 }]}>{e.text}</Text>
               </View>
+            ))}
+            {res.events.length > 0 && res.deaths.length === 0 && (
+              <View style={[s.row, { backgroundColor: '#2b2250' }]}><Text style={[s.rowText, { flex: 1 }]}>Nobody will die tonight.</Text></View>
             )}
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 8 }}>
               <Text style={s.sub}>Discussion timer:</Text>
@@ -1155,6 +1403,7 @@ function Game({ game, setGame, onExit, onRematch, onAward }) {
         <>
           <View style={{ alignItems: 'center', paddingVertical: 8 }}>
             {!!lastNight && <Text style={[s.rowText, { marginBottom: 6, textAlign: 'center', paddingHorizontal: 16 }]}>{lastNight}</Text>}
+            {!!voteMsg && <Text style={[s.rowText, { marginBottom: 6, color: '#ffd66b', textAlign: 'center', paddingHorizontal: 16 }]}>{voteMsg}</Text>}
             {!!silenced && !!find(silenced) && <Text style={[s.rowText, { marginBottom: 6, color: '#ffcf70', textAlign: 'center', paddingHorizontal: 16 }]}>🤐 {find(silenced).player.name} is silenced and can't talk today.</Text>}
             <Text style={{ fontSize: 56, color: '#fff', fontWeight: '800', fontVariant: ['tabular-nums'] }}>{mmss(left)}</Text>
             <Text style={s.sub}>{left === 0 ? "Time's up — vote!" : running ? 'Discussion time' : 'Paused'}</Text>
@@ -1173,13 +1422,16 @@ function Game({ game, setGame, onExit, onRematch, onAward }) {
           <FlatList
             key={cols} numColumns={cols} columnWrapperStyle={{ gap }}
             data={game.assignments} keyExtractor={(a) => a.player.id} contentContainerStyle={{ padding: 16 }}
-            extraData={[reveal, silenced]}
-            renderItem={({ item, index }) => (
-              <TouchableOpacity activeOpacity={0.85} style={[s.card, { width: cardW, marginBottom: gap }, !item.alive && { opacity: 0.4 }]} onPress={() => toggleAlive(index)} onLongPress={() => setInfo(item.role)}>
+            extraData={[reveal, silenced, sel]}
+            renderItem={({ item }) => (
+              <TouchableOpacity activeOpacity={0.85}
+                style={[s.card, { width: cardW, marginBottom: gap }, !item.alive && { opacity: 0.4 }, sel === item.player.id && s.cardOn]}
+                onPress={() => setSel(sel === item.player.id ? null : item.player.id)} onLongPress={() => setInfo(item.role)}>
                 <View>
                   <Avatar uri={item.player.photo} fallback={item.player.name[0]?.toUpperCase()} size={Math.min(72, cardW - 40)} />
                   <Text style={s.stateBadge}>{item.alive ? '❤️' : '💀'}</Text>
                   {silenced === item.player.id && <Text style={[s.stateBadge, { bottom: undefined, top: -6, right: undefined, left: -10 }]}>🤐</Text>}
+                  {sel === item.player.id && <PopIn from={0.1} style={s.badge}><Text style={{ fontSize: 13 }}>🎯</Text></PopIn>}
                 </View>
                 <Text style={[s.cardName, !item.alive && { textDecorationLine: 'line-through' }]} numberOfLines={1}>{item.player.name}</Text>
                 {reveal && <Text style={s.sub} numberOfLines={1}>{item.role.name}</Text>}
@@ -1187,9 +1439,16 @@ function Game({ game, setGame, onExit, onRematch, onAward }) {
               </TouchableOpacity>
             )}
           />
-          <Text style={[s.sub, { textAlign: 'center' }]}>Tap = alive/dead · Long-press = role info (moderator)</Text>
-          <View style={s.footer}>
-            <Btn title="🌙 Turn to Night" onPress={toNight} />
+          <Text style={[s.sub, { textAlign: 'center' }]}>Tap a player to select · Long-press = role info (moderator)</Text>
+          <View style={[s.footer, { flexDirection: 'row', gap: 10 }]}>
+            {selA ? (
+              <>
+                <Btn title="Cancel" kind="ghost" sfx="deny" onPress={() => setSel(null)} style={{ flex: 1 }} />
+                {selA.alive
+                  ? <Btn title={`⚖️ Vote out ${selA.player.name}`} kind="danger" sfx="none" onPress={voteOut} style={{ flex: 2 }} />
+                  : <Btn title={`↩️ Bring back ${selA.player.name}`} sfx="none" onPress={bringBack} style={{ flex: 2 }} />}
+              </>
+            ) : <Btn title="🌙 Turn to Night" onPress={toNight} style={{ flex: 1 }} />}
           </View>
         </>
       )}
@@ -1223,15 +1482,17 @@ function Game({ game, setGame, onExit, onRematch, onAward }) {
 }
 
 /* ---------- game over ---------- */
-// Who gains rating: a team win rewards every player on that team (alive or dead), except "wins when voted out"
-// roles (Jester). A solo win rewards only that player. Each player gains the ratingGain of their role.
+// Who gains rating: a team win rewards every player on that team (alive or dead). Co-winners — a Jester who was voted out,
+// an Executioner whose target was voted out — also win and gain their role's ratingGain. They are not rewarded just for
+// being on the winning team. Each player gains the ratingGain of their role.
 const computeResult = (assignments, kind) => {
   const gains = {};
+  if (kind === 'none' || !kind) return gains;
   assignments.forEach((a) => {
     let won = false;
-    if (kind === 'solo') won = !!a.role.winOnVote && !!a.votedOut && !a.alive;
-    else if (kind === 'townie') won = a.role.team === 'Townie' && !a.role.winOnVote;
-    else if (kind === 'villain') won = a.role.team === 'Villain' && !a.role.winOnVote;
+    if (a.role.winOnVote) won = !!a.votedOut && !a.alive;
+    else if (a.role.winOnTarget) won = !!a.won;
+    else won = a.role.team === (kind === 'townie' ? 'Townie' : 'Villain');
     if (won) gains[a.player.id] = a.role.ratingGain ?? 10;
   });
   return gains;
@@ -1240,9 +1501,9 @@ const computeResult = (assignments, kind) => {
 function GameOver({ winner, winKind, assignments, onKeep, onAward, onRematch, onExit }) {
   const gains = computeResult(assignments, winKind);
   const anyGain = Object.keys(gains).length > 0;
-  const bgColor = { townie: '#12351f', villain: '#3a1018', solo: '#2a1f4a', none: '#25262e' }[winKind];
-  const icon = { townie: '🎉', villain: '🐺', solo: '🃏', none: '🤝' }[winKind];
-  const burst = { townie: '🎉', villain: '🔥', solo: '🃏', none: '✨' }[winKind];
+  const bgColor = { townie: '#12351f', villain: '#3a1018', none: '#25262e' }[winKind];
+  const icon = { townie: '🎉', villain: '🐺', none: '🤝' }[winKind];
+  const burst = { townie: '🎉', villain: '🔥', none: '✨' }[winKind];
   // theme pauses, the win jingle plays (after the "killed" sound if someone just died), theme resumes on close
   useEffect(() => {
     Sound.pauseMusic();
