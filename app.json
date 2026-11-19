@@ -10,7 +10,7 @@
       "supportsTablet": true
     },
     "android": {
-      "package": "com.anaxios.andrywinx",
+      "package": "com.andrywinx.anaxios",
       "adaptiveIcon": {
         "backgroundColor": "#444d8f",
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -33,7 +33,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "18c6813a-f5d8-4950-98a4-d03090022e0d"
+        "projectId": "989286e1-fcba-4da9-aaa8-39d870020c92"
       }
     },
     "owner": "andrywinx"
