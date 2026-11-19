@@ -11,6 +11,7 @@ A mobile **Werewolf-style game moderator** built with Expo / React Native. The m
 - **Default roles** – Villager, Doctor, Seer, Jester, Avenger, Werewolf, Police, Mayor, Hunter, Vampire, Bodyguard, Transporter, Veteran, Executioner, Retributionist, Hexer.
 - **Win logic** – Townies or Villains win; the Jester (voted out) and the Executioner (target voted out) share the win.
 - **Ratings** – players only ever gain points; saved when the moderator taps "Save ratings…" at the end of a game.
+- **Impostor mode** – a separate party game: pick players, pick word categories, choose how many impostors (up to everyone), then pass the phone so each player sees the secret word or "IMPOSTOR".
 - **Music and sound effects**, animations, screen kept awake during a game.
 - All data (players, roles, ratings) is stored **on the device** (AsyncStorage). Nothing is sent to a server.
 
@@ -83,6 +84,7 @@ Useful commands while the server is running:
 ```
 .
 ├── App.js                      # the whole app (screens, game logic, roles, sounds)
+├── impostorWords.js            # word lists for the Impostor game (edit this to add words / categories)
 ├── app.json                    # app name, icon, plugins
 ├── package.json
 └── assets/
@@ -261,6 +263,18 @@ Jester +40 · Executioner +30 · Werewolf +25 · Townie roles +15 · Vampire +10
 
 ---
 
+### Impostor mode (how to play)
+
+1. Main menu → **Impostor** → tick the players (minimum 3).
+2. Choose one or more **categories**. The secret word is picked at random from them. Tap **Edit my own words** to type your own list (saved on the device).
+3. Choose the **number of impostors** (1 up to everyone). Optional: let impostors see the category hint, or know each other.
+4. Pass the phone: each player taps *Show my card*, sees either the secret word or **IMPOSTOR**, then hides it and passes it on.
+5. Everyone gives one clue about the word without saying it, then vote. Tap **Reveal the impostors** to see the result, then **Play again** for a new word.
+
+**Where the words are stored:** in `impostorWords.js`, bundled inside the app. No internet or API is needed, it works offline and never changes unexpectedly. To add words, edit that file (add to a category's `words` array, or add a new category object) and rebuild or reload the app. Words typed in-app under *My words* are stored on the phone.
+
+---
+
 ## 8. Starting from a blank folder (no repository yet)
 
 ```bash
@@ -271,7 +285,7 @@ npx expo install @react-native-async-storage/async-storage expo-image-picker exp
 
 Then:
 
-1. Replace the generated `App.js` with this project's `App.js`.
+1. Replace the generated `App.js` with this project's `App.js` and copy `impostorWords.js` next to it.
 2. Copy the whole `assets/` folder into the project.
 3. Update `app.json` as shown in section 4 (do not copy a `package.json` from elsewhere; the one created by `create-expo-app` already matches your SDK).
 4. Run `npx expo start`.

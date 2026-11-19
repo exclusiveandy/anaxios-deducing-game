@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, FlatList, Image, ImageBackground, Modal, Switch, useWindowDimensions,
+  View, Text, TextInput, TouchableOpacity, FlatList, Image, ImageBackground, Modal, Switch, KeyboardAvoidingView, useWindowDimensions,
   StyleSheet, SafeAreaView, ScrollView, Alert, Platform, AppState, Animated, Easing, Pressable, StatusBar as RNStatusBar,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
@@ -8,6 +8,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { useKeepAwake } from 'expo-keep-awake';
 import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import { IMPOSTOR_CATEGORIES } from './impostorWords';
 
 /* ---------- audio ---------- */
 // To change a sound later, just replace the file in assets/audio (keep the same file name).
@@ -537,12 +538,24 @@ export default function App() {
   const [counts, setCounts] = useState({});
   const [game, setGame] = useState(null);         // { assignments: [{player, role, alive}] }
   const [muted, setMuted] = useState(false);
+  // Impostor game settings + current round
+  const [customWords, setCustomWords] = useState([]);
+  const [imp, setImp] = useState({ cats: {}, count: 1, hints: 3, seeMates: false, deal: null });
+  const seenWords = useRef(new Set());   // words already used this session (avoids repeats)
 
   useEffect(() => {
     (async () => {
       try {
         const mu = await AsyncStorage.getItem(MUTE_KEY);
         Sound.setMuted(mu === '1'); setMuted(mu === '1');
+        try {
+          const cw = await AsyncStorage.getItem(IMP_CUSTOM_KEY);
+          if (cw) setCustomWords(JSON.parse(cw));
+          else {   // old version stored plain words without hints: keep them as incomplete entries so they can be finished
+            const old = await AsyncStorage.getItem(IMP_CUSTOM_OLD);
+            if (old) setCustomWords(JSON.parse(old).map((w) => ({ id: uid(), w, h: ['', '', ''] })));
+          }
+        } catch (e) {}
         const p = await AsyncStorage.getItem(PLAYERS_KEY);
         const r = await AsyncStorage.getItem(ROLES_KEY);
         let plist = p ? JSON.parse(p) : [];
@@ -626,9 +639,35 @@ export default function App() {
 
   const selectedPlayers = useMemo(() => players.filter((p) => selected[p.id]), [players, selected]);
 
+  const saveCustom = (list) => { setCustomWords(list); AsyncStorage.setItem(IMP_CUSTOM_KEY, JSON.stringify(list)).catch(() => {}); };
+  // picks a random word from the chosen categories and decides who the impostors are
+  const dealImpostor = () => {
+    const pool = [];
+    const mine = customWords.filter(isCompleteEntry).map((e) => ({ w: e.w.trim(), h: e.h.map((x) => x.trim()) }));
+    [...IMPOSTOR_CATEGORIES, { ...CUSTOM_CAT, words: mine }].forEach((c) => {
+      if (imp.cats[c.id]) c.words.forEach((x) => pool.push({ word: x.w, hints: x.h, category: c.name }));
+    });
+    if (!pool.length || selectedPlayers.length === 0) return null;
+    let fresh = pool.filter((x) => !seenWords.current.has(x.word));
+    if (!fresh.length) { seenWords.current.clear(); fresh = pool; }
+    const pick = fresh[Math.floor(Math.random() * fresh.length)];
+    seenWords.current.add(pick.word);
+    const impIds = new Set(shuffle(selectedPlayers).slice(0, Math.min(imp.count, selectedPlayers.length)).map((p) => p.id));
+    // every impostor gets their own random set of hints
+    return {
+      word: pick.word, category: pick.category, seeMates: imp.seeMates, clockwise: Math.random() < 0.5,
+      cards: selectedPlayers.map((p) => {
+        const isImp = impIds.has(p.id);
+        return { player: p, impostor: isImp, hints: isImp ? shuffle(pick.hints).slice(0, Math.min(imp.hints, pick.hints.length)) : [] };
+      }),
+      first: selectedPlayers[Math.floor(Math.random() * selectedPlayers.length)],
+    };
+  };
+  const startImpostor = () => { const d = dealImpostor(); if (d) { setImp({ ...imp, deal: d }); setScreen('imp-reveal'); } };
+
   let body = null;
   if (!loaded) body = <View style={s.center}><Text style={s.sub}>Loading…</Text></View>;
-  else if (screen === 'home') body = <Home go={setScreen} onNew={() => { setSelected({}); setScreen('pick'); }} muted={muted} onToggleMute={toggleMute} />;
+  else if (screen === 'home') body = <Home go={setScreen} onNew={() => { setSelected({}); setScreen('pick'); }} onImpostor={() => { setSelected({}); setScreen('imp-pick'); }} muted={muted} onToggleMute={toggleMute} />;
   else if (screen === 'library') body = <Library players={players} setPlayers={setPlayers} onBack={() => setScreen('home')} />;
   else if (screen === 'roles') body = <Roles roles={roles} setRoles={setRoles} onBack={() => setScreen('home')} />;
   else if (screen === 'pick') body = (
@@ -661,6 +700,27 @@ export default function App() {
       onCancel={() => { setGame(null); setScreen('assign'); }}
       onDone={() => setScreen('game')} />
   );
+  else if (screen === 'imp-pick') body = (
+    <PickPlayers title="Impostor – Players" min={3} players={players} selected={selected} setSelected={setSelected}
+      onBack={() => setScreen('home')}
+      onNext={() => { setImp({ ...imp, count: Math.min(Math.max(1, imp.count), selectedPlayers.length) }); setScreen('imp-cat'); }}
+      goLibrary={() => setScreen('library')} />
+  );
+  else if (screen === 'imp-cat') body = (
+    <ImpCategories custom={customWords} picked={imp.cats} setPicked={(m) => setImp({ ...imp, cats: m })} onSaveCustom={saveCustom}
+      onBack={() => setScreen('imp-pick')} onNext={() => setScreen('imp-setup')} />
+  );
+  else if (screen === 'imp-setup') body = (
+    <ImpSetup n={selectedPlayers.length} count={Math.min(imp.count, selectedPlayers.length)} setCount={(c) => setImp({ ...imp, count: c })}
+      hints={imp.hints} setHints={(v) => setImp({ ...imp, hints: v })} seeMates={imp.seeMates} setSeeMates={(v) => setImp({ ...imp, seeMates: v })}
+      onBack={() => setScreen('imp-cat')} onStart={startImpostor} />
+  );
+  else if (screen === 'imp-reveal' && imp.deal) body = (
+    <ImpReveal deal={imp.deal} onCancel={() => setScreen('imp-setup')} onDone={() => setScreen('imp-play')} />
+  );
+  else if (screen === 'imp-play' && imp.deal) body = (
+    <ImpPlay deal={imp.deal} onAgain={startImpostor} onSettings={() => setScreen('imp-setup')} onExit={() => { setImp({ ...imp, deal: null }); setScreen('home'); }} />
+  );
   else if (screen === 'game' && game) body = <Game game={game} setGame={setGame} roles={roles} onExit={() => { setGame(null); setScreen('home'); }} onRematch={() => { setGame(null); setScreen('assign'); }} onAward={awardGains} />;
 
   if (loaded && screen === 'home') {
@@ -681,7 +741,7 @@ export default function App() {
 }
 
 /* ---------- home ---------- */
-function Home({ go, onNew, muted, onToggleMute }) {
+function Home({ go, onNew, onImpostor, muted, onToggleMute }) {
   const zoom = useRef(new Animated.Value(0)).current;
   useEffect(() => {   // slow "breathing" zoom on the wallpaper
     const loop = Animated.loop(Animated.sequence([
@@ -698,11 +758,12 @@ function Home({ go, onNew, muted, onToggleMute }) {
       <TouchableOpacity onPress={onToggleMute} style={s.muteBtn} activeOpacity={0.8}>
         <Text style={{ fontSize: 20 }}>{muted ? '🔇' : '🔊'}</Text>
       </TouchableOpacity>
-      <View style={{ flex: 1, justifyContent: 'flex-end', padding: 20, paddingBottom: Platform.OS === 'ios' ? 254 : 238 }}>
+      <View style={{ flex: 1, justifyContent: 'flex-end', padding: 20, paddingBottom: Platform.OS === 'ios' ? 194 : 178 }}>
         <View>
           <FadeUp delay={150} dy={30} style={{ alignItems: 'stretch' }}><Btn title="New Game" onPress={onNew} style={[s.wide, { backgroundColor: '#e0952b' }]} /></FadeUp>
           <FadeUp delay={300} dy={30} style={{ alignItems: 'stretch' }}><Btn title="Players Library" kind="ghost" onPress={() => go('library')} style={[s.wide, s.menuGhost]} /></FadeUp>
-          <FadeUp delay={450} dy={30} style={{ alignItems: 'stretch' }}><Btn title="Available Roles" kind="ghost" onPress={() => go('roles')} style={[s.wide, s.menuGhost, { marginBottom: 0 }]} /></FadeUp>
+          <FadeUp delay={450} dy={30} style={{ alignItems: 'stretch' }}><Btn title="Available Roles" kind="ghost" onPress={() => go('roles')} style={[s.wide, s.menuGhost]} /></FadeUp>
+          <FadeUp delay={600} dy={30} style={{ alignItems: 'stretch' }}><Btn title="Impostor" onPress={onImpostor} style={[s.wide, { backgroundColor: '#b3303f', marginBottom: 0 }]} /></FadeUp>
         </View>
       </View>
     </View>
@@ -923,13 +984,13 @@ const useGrid = () => {
 };
 
 /* ---------- new game: pick players (cards) ---------- */
-function PickPlayers({ players, selected, setSelected, onBack, onNext, goLibrary }) {
+function PickPlayers({ players, selected, setSelected, onBack, onNext, goLibrary, title = 'Select Players', min = 4 }) {
   const { cols, gap, cardW } = useGrid();
   const n = players.filter((p) => selected[p.id]).length;
   const allOn = players.length > 0 && n === players.length;
   return (
     <View style={{ flex: 1 }}>
-      <Header title="Select Players" onBack={onBack}
+      <Header title={title} onBack={onBack}
         right={players.length ? <TouchableOpacity onPress={() => { const m = {}; if (!allOn) players.forEach((p) => (m[p.id] = true)); setSelected(m); }}><Text style={s.link}>{allOn ? 'None' : 'All'}</Text></TouchableOpacity> : null} />
       <FlatList
         key={cols} numColumns={cols} columnWrapperStyle={{ gap }}
@@ -957,8 +1018,8 @@ function PickPlayers({ players, selected, setSelected, onBack, onNext, goLibrary
         }}
       />
       <View style={s.footer}>
-        <Text style={[s.sub, { textAlign: 'center', marginBottom: 8 }]}>{n} player{n === 1 ? '' : 's'} selected (min 4)</Text>
-        <Btn title="Next" onPress={onNext} disabled={n < 4} />
+        <Text style={[s.sub, { textAlign: 'center', marginBottom: 8 }]}>{n} player{n === 1 ? '' : 's'} selected (min {min})</Text>
+        <Btn title="Next" onPress={onNext} disabled={n < min} />
       </View>
     </View>
   );
@@ -1087,6 +1148,271 @@ function RevealRoles({ game, onCancel, onDone }) {
           </View>
         )}
       </ScrollView>
+    </View>
+  );
+}
+
+/* ---------- IMPOSTOR game (separate from Werewolf) ---------- */
+// Flow: pick players -> pick categories -> how many impostors -> pass the device (each player sees the word or "IMPOSTOR") -> discuss -> reveal.
+const IMP_CUSTOM_KEY = 'ww_imp_custom_v2';       // [{ id, w, h: [hint1, hint2, hint3] }]
+const IMP_CUSTOM_OLD = 'ww_imp_custom_v1';       // old format: plain list of words (no hints)
+const CUSTOM_CAT = { id: 'custom', name: 'My words', emoji: '✏️' };
+// a custom word is usable only when it has the word and all 3 hints
+const isCompleteEntry = (e) => !!e.w && !!e.w.trim() && Array.isArray(e.h) && e.h.length >= 3 && e.h.slice(0, 3).every((x) => !!x && !!x.trim());
+// Impostor mode pictures: genuine = knows the word, impostor = the impostor (replace the files in assets/impostor to change them)
+const IMP_IMG = { genuine: require('./assets/impostor/genuine.png'), impostor: require('./assets/impostor/impostor.png') };
+const ImpImg = ({ kind, size }) => <Image source={IMP_IMG[kind]} style={{ width: size, height: size, borderRadius: size * 0.2 }} />;
+
+// Clockwise / counterclockwise banner (decided randomly at the start of each round)
+const Direction = ({ clockwise }) => (
+  <View style={{ alignItems: 'center', marginTop: 14 }}>
+    <Text style={{ fontSize: 46, color: '#ffd66b' }}>{clockwise ? '↻' : '↺'}</Text>
+    <Text style={[s.rowText, { color: '#ffd66b' }]}>{clockwise ? 'Clockwise' : 'Counterclockwise'}</Text>
+    <Text style={[s.sub, { textAlign: 'center', marginTop: 2 }]}>
+      After each clue, the turn passes to the player on {clockwise ? 'the left' : 'the right'}.
+    </Text>
+  </View>
+);
+
+// Full-screen editor for "My words": each word needs 3 hints
+function CustomEditor({ visible, entries, onSave, onClose }) {
+  const [list, setList] = useState([]);
+  useEffect(() => { if (visible) setList(entries.length ? entries.map((e) => ({ ...e, h: [...e.h] })) : [{ id: uid(), w: '', h: ['', '', ''] }]); }, [visible]);
+  const upd = (i, patch) => setList(list.map((e, k) => (k === i ? { ...e, ...patch } : e)));
+  const updHint = (i, j, t) => upd(i, { h: list[i].h.map((x, k) => (k === j ? t : x)) });
+  const doSave = () => onSave(list.filter((e) => e.w.trim() || e.h.some((x) => x.trim())).map((e) => ({ id: e.id, w: e.w.trim(), h: e.h.map((x) => x.trim()) })));
+  const save = () => {
+    const bad = list.filter((e) => (e.w.trim() || e.h.some((x) => x.trim())) && !isCompleteEntry(e)).length;
+    if (bad) Alert.alert('Missing hints', `${bad} word${bad === 1 ? '' : 's'} need a word and 3 hints. Incomplete words are skipped in the game.`, [
+      { text: 'Keep editing', style: 'cancel' }, { text: 'Save anyway', onPress: doSave },
+    ]);
+    else doSave();
+  };
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#14162b', paddingTop: Platform.OS === 'android' ? RNStatusBar.currentHeight : 0 }}>
+        <Header title="My words" onBack={onClose} right={<TouchableOpacity onPress={save}><Text style={s.link}>Save</Text></TouchableOpacity>} />
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
+            <Text style={[s.sub, { marginBottom: 10 }]}>Type the secret word and 3 hints about it. Impostors will see the hints (never the word).</Text>
+            {list.map((e, i) => (
+              <View key={e.id} style={[s.row, { flexDirection: 'column', alignItems: 'stretch', gap: 0 }, !isCompleteEntry(e) && (e.w.trim() || e.h.some((x) => x.trim())) && { borderColor: '#ffcf70' }]}>
+                <Text style={s.label}>Word {i + 1}</Text>
+                <TextInput style={s.input} placeholder="Secret word (e.g. Dog)" placeholderTextColor="#777" value={e.w} onChangeText={(t) => upd(i, { w: t })} />
+                {[0, 1, 2].map((j) => (
+                  <TextInput key={j} style={s.input} placeholder={`Hint ${j + 1}`} placeholderTextColor="#777" value={e.h[j]} onChangeText={(t) => updHint(i, j, t)} />
+                ))}
+                <TouchableOpacity onPress={() => setList(list.filter((_, k) => k !== i))} style={{ alignSelf: 'flex-end', paddingVertical: 4 }}>
+                  <Text style={[s.link, { color: '#ff8a8a' }]}>Delete</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+            <Btn title="＋ Add another word" kind="ghost" onPress={() => setList([...list, { id: uid(), w: '', h: ['', '', ''] }])} />
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+function ImpCategories({ custom, picked, setPicked, onSaveCustom, onBack, onNext }) {
+  const { cols, gap, cardW } = useGrid();
+  const [editing, setEditing] = useState(false);
+  const ready = custom.filter(isCompleteEntry).map((e) => ({ w: e.w.trim(), h: e.h.map((x) => x.trim()) }));
+  const all = [...IMPOSTOR_CATEGORIES, { ...CUSTOM_CAT, words: ready }];
+  const chosen = all.filter((c) => picked[c.id]);
+  const total = chosen.reduce((a, c) => a + c.words.length, 0);
+  const allOn = chosen.length === all.length;
+  return (
+    <View style={{ flex: 1 }}>
+      <Header title="Choose Categories" onBack={onBack}
+        right={<TouchableOpacity onPress={() => { const m = {}; if (!allOn) all.forEach((c) => (m[c.id] = true)); setPicked(m); }}><Text style={s.link}>{allOn ? 'None' : 'All'}</Text></TouchableOpacity>} />
+      <Text style={[s.sub, { textAlign: 'center', paddingHorizontal: 16 }]}>Pick one or more. The secret word is chosen randomly from them.</Text>
+      <FlatList
+        key={cols} numColumns={cols} columnWrapperStyle={{ gap }}
+        data={all} keyExtractor={(c) => c.id} contentContainerStyle={{ padding: 16 }}
+        ListFooterComponent={
+          <TouchableOpacity onPress={() => setEditing(true)} style={{ alignItems: 'center', paddingVertical: 6 }}>
+            <Text style={s.link}>✏️ Add / edit my own words ({ready.length}{custom.length > ready.length ? `, ${custom.length - ready.length} incomplete` : ''})</Text>
+          </TouchableOpacity>}
+        renderItem={({ item }) => {
+          const on = !!picked[item.id];
+          return (
+            <Bounce trigger={on} style={{ width: cardW, marginBottom: gap }}>
+              <TouchableOpacity activeOpacity={0.85} style={[s.card, on && s.cardOn]} onPress={() => setPicked({ ...picked, [item.id]: !on })}>
+                <View>
+                  <Text style={{ fontSize: Math.min(44, cardW - 50) }}>{item.emoji}</Text>
+                  {on && <PopIn from={0.1} style={s.badge}><Text style={{ color: '#fff', fontWeight: '800' }}>✓</Text></PopIn>}
+                </View>
+                <Text style={s.cardName} numberOfLines={2}>{item.name}</Text>
+                <Text style={[s.sub, { fontSize: 12 }]}>{item.words.length} words</Text>
+              </TouchableOpacity>
+            </Bounce>
+          );
+        }}
+      />
+      <View style={s.footer}>
+        <Text style={[s.sub, { textAlign: 'center', marginBottom: 8 }]}>{chosen.length} categor{chosen.length === 1 ? 'y' : 'ies'} · {total} words</Text>
+        <Btn title="Next" onPress={onNext} disabled={total === 0} />
+      </View>
+      <CustomEditor visible={editing} entries={custom} onSave={(l) => { onSaveCustom(l); setEditing(false); }} onClose={() => setEditing(false)} />
+    </View>
+  );
+}
+
+function ImpSetup({ n, count, setCount, hints, setHints, seeMates, setSeeMates, onBack, onStart }) {
+  const all = count === n;
+  return (
+    <View style={{ flex: 1 }}>
+      <Header title="Impostors" onBack={onBack} />
+      <ScrollView contentContainerStyle={{ padding: 16 }}>
+        <View style={{ alignItems: 'center', marginVertical: 12 }}>
+          <Bob><ImpImg kind="impostor" size={120} /></Bob>
+          <Text style={[s.sub, { marginTop: 10 }]}>How many impostors?</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 22, marginTop: 8 }}>
+            <TouchableOpacity style={[s.stepper, { width: 52, height: 52, borderRadius: 26 }]} onPress={() => setCount(Math.max(1, count - 1))}><Text style={s.stepText}>−</Text></TouchableOpacity>
+            <Text style={{ color: '#fff', fontSize: 54, fontWeight: '800', minWidth: 70, textAlign: 'center' }}>{count}</Text>
+            <TouchableOpacity style={[s.stepper, { width: 52, height: 52, borderRadius: 26 }]} onPress={() => setCount(Math.min(n, count + 1))}><Text style={s.stepText}>＋</Text></TouchableOpacity>
+          </View>
+          <Text style={[s.rowText, { marginTop: 10, fontWeight: '400' }]}>{count} impostor{count === 1 ? '' : 's'} · {n - count} with the word</Text>
+          <TouchableOpacity onPress={() => setCount(n)} style={{ marginTop: 8 }}><Text style={s.link}>Make everyone an impostor</Text></TouchableOpacity>
+          {all && <Text style={[s.sub, { color: '#ffcf70', textAlign: 'center', marginTop: 8 }]}>Everyone is an impostor — nobody will know the word!</Text>}
+        </View>
+        <StepRow label="Hints shown to each impostor (0 = none, 3 recommended)" value={hints} min={0} max={5} onChange={setHints} />
+        <Text style={[s.sub, { marginBottom: 10 }]}>Hints are picked at random from the word's hint list, so they differ every round.</Text>
+        <SwitchRow title="Impostors know each other" sub="Each impostor is shown the other impostors" value={seeMates} onChange={setSeeMates} />
+      </ScrollView>
+      <View style={s.footer}><Btn title="Confirm & Hand Out Cards" onPress={onStart} /></View>
+    </View>
+  );
+}
+
+function ImpReveal({ deal, onCancel, onDone }) {
+  const [i, setI] = useState(0);
+  const [stage, setStage] = useState('pass');   // 'pass' -> 'card' -> (next player) ... -> 'ready'
+  const total = deal.cards.length;
+  const c = deal.cards[i];
+  const last = i === total - 1;
+  const mates = deal.seeMates ? deal.cards.filter((x) => x.impostor && x.player.id !== c.player.id) : [];
+  const confirmCancel = () =>
+    Alert.alert('Cancel?', 'A new word will be picked next time.', [
+      { text: 'Keep going', style: 'cancel' },
+      { text: 'Cancel', style: 'destructive', onPress: onCancel },
+    ]);
+  const next = () => { if (last) setStage('ready'); else { setStage('pass'); setI(i + 1); } };
+  return (
+    <View style={{ flex: 1 }}>
+      <Header title={stage === 'ready' ? 'Ready to play' : `Player ${i + 1} / ${total}`} onBack={confirmCancel} />
+      <ScrollView contentContainerStyle={s.revealWrap}>
+        {stage === 'pass' && (
+          <FadeUp key={`pass-${i}`} dx={110} dy={0} duration={450} style={{ width: '100%' }}>
+            <Text style={[s.sub, { marginBottom: 10 }]}>Pass the device to</Text>
+            <Bob><PopIn delay={150} from={0.2}><Avatar uri={c.player.photo} fallback={c.player.name[0]?.toUpperCase()} size={150} /></PopIn></Bob>
+            <Text style={[s.title, { fontSize: 34, marginTop: 14 }]}>{c.player.name}</Text>
+            <View style={{ height: 26 }} />
+            <Text style={[s.sub, { textAlign: 'center', marginVertical: 18 }]}>Make sure nobody else is looking at the screen.</Text>
+            <Btn title="Show my card" onPress={() => setStage('card')} style={s.wide} />
+          </FadeUp>
+        )}
+        {stage === 'card' && (
+          <View key={`card-${i}`} style={{ alignItems: 'center', width: '100%' }}>
+            <FadeUp dy={8}><Text style={[s.sub, { marginBottom: 10 }]}>{c.player.name}, you are…</Text></FadeUp>
+            <View style={{ width: 170, height: 150, alignItems: 'center', justifyContent: 'center' }}>
+              <Glow color={c.impostor ? '#ff4d5e' : '#3ddc97'} size={210} />
+              <Burst emoji={c.impostor ? '🔥' : '✨'} />
+              <FlipIn delay={100}><ImpImg kind={c.impostor ? 'impostor' : 'genuine'} size={150} /></FlipIn>
+            </View>
+            {c.impostor ? (
+              <>
+                <FadeUp delay={450}><Text style={[s.title, { fontSize: 38, marginTop: 14, color: '#ff6b7a' }]}>IMPOSTOR</Text></FadeUp>
+                <FadeUp delay={600}><Text style={[s.rowText, { fontWeight: '400', textAlign: 'center', marginTop: 16 }]}>You don't know the word. Blend in!</Text></FadeUp>
+                {c.hints.length > 0 && (
+                  <FadeUp delay={700} style={{ width: '100%', marginTop: 14 }}>
+                    <Text style={[s.sub, { textAlign: 'center', marginBottom: 6 }]}>Your hints about the word</Text>
+                    {c.hints.map((h, k) => (
+                      <View key={k} style={[s.row, { justifyContent: 'center', backgroundColor: '#2b2250', marginBottom: 8 }]}>
+                        <Text style={[s.rowText, { color: '#ffd66b', textAlign: 'center' }]}>{h}</Text>
+                      </View>
+                    ))}
+                  </FadeUp>
+                )}
+                {mates.length > 0 && <FadeUp delay={800}><Text style={[s.rowText, { textAlign: 'center', marginTop: 12 }]}>Other impostors: {mates.map((m) => m.player.name).join(', ')}</Text></FadeUp>}
+              </>
+            ) : (
+              <>
+                <FadeUp delay={450}><Text style={[s.sub, { marginTop: 14, textAlign: 'center' }]}>The secret word is</Text></FadeUp>
+                <FadeUp delay={550}><Text style={[s.title, { fontSize: 40, marginTop: 6, textAlign: 'center', color: '#6ee7a8' }]}>{deal.word}</Text></FadeUp>
+              </>
+            )}
+            <FadeUp delay={950} style={{ width: '100%', marginTop: 26 }}>
+              <Btn title={last ? 'Hide my card' : 'Hide card & pass to next player'} onPress={next} style={s.wide} />
+            </FadeUp>
+          </View>
+        )}
+        {stage === 'ready' && (
+          <View key="ready" style={{ alignItems: 'center', width: '100%' }}>
+            <Bob amount={10} duration={1200}><PopIn from={0.2}><View style={{ marginTop: 20 }}><ImpImg kind="genuine" size={120} /></View></PopIn></Bob>
+            <FadeUp delay={200}><Text style={[s.title, { fontSize: 30, marginTop: 14, textAlign: 'center' }]}>Everyone has their card</Text></FadeUp>
+            <FadeUp delay={350}>
+              <Text style={[s.sub, { textAlign: 'center', marginTop: 18, lineHeight: 21 }]}>Put the device in the middle of the table.</Text>
+              <Direction clockwise={deal.clockwise} />
+              <View style={{ height: 18 }} />
+            </FadeUp>
+            <FadeUp delay={500} style={{ width: '100%' }}><Btn title="Start the round" onPress={onDone} style={s.wide} /></FadeUp>
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+function ImpPlay({ deal, onAgain, onSettings, onExit }) {
+  const [shown, setShown] = useState(false);
+  useEffect(() => { setShown(false); }, [deal]);
+  return (
+    <View style={{ flex: 1 }}>
+      <Header title={shown ? 'Result' : 'Discussion'} onBack={() => Alert.alert('End round?', 'Return to the main menu?', [{ text: 'Cancel', style: 'cancel' }, { text: 'End', style: 'destructive', onPress: onExit }])} />
+      <ScrollView contentContainerStyle={{ padding: 20, alignItems: 'center' }}>
+        {!shown ? (
+          <>
+            <Bob><View style={{ marginTop: 10 }}><ImpImg kind="genuine" size={120} /></View></Bob>
+            <Text style={[s.title, { fontSize: 26, textAlign: 'center', marginTop: 10 }]}>{deal.first.name} starts!</Text>
+            <Direction clockwise={deal.clockwise} />
+            <Text style={[s.sub, { textAlign: 'center', marginTop: 14, lineHeight: 21 }]}>
+              Take turns saying one clue about the word without saying it.{'\n'}Impostors try to blend in.{'\n'}When everyone is ready, vote for who you think the impostor is.
+            </Text>
+          </>
+        ) : (
+          <>
+            <Text style={s.sub}>The secret word was</Text>
+            <Text style={[s.title, { fontSize: 40, color: '#6ee7a8', marginVertical: 6, textAlign: 'center' }]}>{deal.word}</Text>
+            <Text style={[s.sub, { marginBottom: 14 }]}>Category: {deal.category}</Text>
+            {deal.cards.map((c, idx) => (
+              <FadeUp key={c.player.id} delay={idx * 80} dy={14} style={{ width: '100%' }}>
+                <View style={[s.row, { width: '100%' }, c.impostor && { borderColor: '#ff6b7a', backgroundColor: '#3a1820' }]}>
+                  <Avatar uri={c.player.photo} fallback={c.player.name[0]?.toUpperCase()} />
+                  <Text style={[s.rowText, { flex: 1 }]}>{c.player.name}</Text>
+                  <ImpImg kind={c.impostor ? 'impostor' : 'genuine'} size={36} />
+                  <Text style={[s.rowText, { color: c.impostor ? '#ff6b7a' : '#6ee7a8' }]}>{c.impostor ? 'Impostor' : 'Knew the word'}</Text>
+                </View>
+              </FadeUp>
+            ))}
+          </>
+        )}
+      </ScrollView>
+      <View style={s.footer}>
+        {!shown ? (
+          <Btn title="Reveal the impostors" onPress={() => setShown(true)} />
+        ) : (
+          <>
+            <Btn title="Play again (new word)" onPress={onAgain} style={{ marginBottom: 10 }} />
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <Btn title="Change settings" kind="ghost" sfx="deny" onPress={onSettings} style={{ flex: 1 }} />
+              <Btn title="Main menu" kind="ghost" sfx="deny" onPress={onExit} style={{ flex: 1 }} />
+            </View>
+          </>
+        )}
+      </View>
     </View>
   );
 }
